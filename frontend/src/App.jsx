@@ -2,47 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Plot from "react-plotly.js";
 import { toPng } from "html-to-image";
 
-const BROWSER_ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
-const URL_API_BASE =
-  typeof window !== "undefined"
-    ? new URLSearchParams(window.location.search).get("api") || ""
-    : "";
-const DEFAULT_API_BASE = import.meta.env.DEV ? "http://127.0.0.1:8000" : BROWSER_ORIGIN;
-const API_BASE = (URL_API_BASE || import.meta.env.VITE_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, "");
-const API_CANDIDATES = Array.from(
-  new Set(
-    [API_BASE, BROWSER_ORIGIN, "http://127.0.0.1:8000"]
-      .map((x) => String(x || "").replace(/\/+$/, ""))
-      .filter(Boolean)
-  )
-);
 const ASSET_BASE = import.meta.env.BASE_URL || "/";
-
-async function fetchJsonWithFallback(path) {
-  let lastErr = null;
-  for (const base of API_CANDIDATES) {
-    try {
-      const res = await fetch(`${base}${path}`);
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      return await res.json();
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr || new Error("Failed to fetch from all API backends");
-}
-
-const API = {
-  health: () => fetchJsonWithFallback("/api/health"),
-  players: (season) => fetchJsonWithFallback(`/api/players?season=${encodeURIComponent(season)}`),
-  trends: (playerId, season, seasonType) =>
-    fetchJsonWithFallback(
-      `/api/trends/player?player_id=${playerId}&source=overall&season=${encodeURIComponent(season)}&season_type=${encodeURIComponent(seasonType)}`
-    )
-};
-
+const DATA_BASE = `${ASSET_BASE}data`;
 const FALLBACK_HEADSHOT = "https://cdn.nba.com/headshots/nba/latest/260x190/fallback.png";
 
 const PODCAST_LOGOS = [
@@ -83,15 +44,18 @@ const PODCAST_LOGOS = [
   }
 ];
 
-function seasonOptionsFromDefault(defaultSeason, count = 8) {
-  const y = Number(String(defaultSeason || "2025-26").slice(0, 4));
-  if (!Number.isFinite(y)) return ["2025-26", "2024-25", "2023-24"];
-  const out = [];
-  for (let i = 0; i < count; i += 1) {
-    const start = y - i;
-    out.push(`${start}-${String((start + 1) % 100).padStart(2, "0")}`);
+const SEASON_TYPES = ["Regular Season", "Playoffs"];
+
+function slugSeasonType(seasonType) {
+  return String(seasonType || "Regular Season").toLowerCase().replace(/\s+/g, "-");
+}
+
+async function fetchJson(path) {
+  const response = await fetch(path, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} for ${path}`);
   }
-  return out;
+  return response.json();
 }
 
 function rollingAverage(values, windowSize) {
@@ -111,10 +75,36 @@ function toDateLabel(value) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+function isNumericValue(value) {
+  return Number.isFinite(Number(value));
+}
+
+function inferStatFields(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const blacklist = new Set(["PLAYER_ID", "TEAM_ID", "GAME_ID", "GAME_DATE_EST"]);
+  const keys = Object.keys(rows[0] || {});
+  return keys.filter((key) => {
+    if (blacklist.has(key) || key.endsWith("_RANK")) return false;
+    return rows.some((row) => isNumericValue(row[key]));
+  });
+}
+
+function withHeadshot(player) {
+  const pid = Number(player?.player_id || 0);
+  const raw = String(player?.headshot_url || "");
+  const cdn = `https://cdn.nba.com/headshots/nba/latest/1040x760/${pid}.png`;
+  return {
+    ...player,
+    player_id: pid,
+    headshot_url: raw.startsWith("http://") || raw.startsWith("https://") ? raw : cdn
+  };
+}
+
 function App() {
   const exportRef = useRef(null);
+  const logsCacheRef = useRef(new Map());
 
-  const [health, setHealth] = useState(null);
+  const [manifest, setManifest] = useState(null);
   const [players, setPlayers] = useState([]);
 
   const [playerSearch, setPlayerSearch] = useState("");
@@ -132,30 +122,55 @@ function App() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    API.health()
-      .then((h) => {
-        setHealth(h);
-        const defaultSeason = h.default_season || "2025-26";
-        setSeason(defaultSeason);
-        return API.players(defaultSeason);
-      })
-      .then((p) => {
-        const roster = (p.players || []).filter((x) => x.is_active);
+    async function init() {
+      try {
+        const m = await fetchJson(`${DATA_BASE}/manifest.json`);
+        setManifest(m);
+        setSeason(m.default_season || m.seasons?.[0] || "2025-26");
+      } catch (err) {
+        setError(`Failed to load static data manifest: ${err.message}`);
+      }
+    }
+    init();
+  }, []);
+
+  useEffect(() => {
+    async function loadPlayers() {
+      if (!manifest || !season) return;
+      setError("");
+      setTrendData(null);
+      setStatField("");
+
+      try {
+        const playersPath = manifest?.files?.players?.[season] || `players/${season}.json`;
+        const payload = await fetchJson(`${DATA_BASE}/${playersPath}`);
+        const roster = (payload.players || [])
+          .filter((p) => p.is_active !== false)
+          .map(withHeadshot)
+          .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
         setPlayers(roster);
-        if (roster.length) {
+        if (roster.length > 0) {
           const first = roster[0];
           setPlayerId(first.player_id);
           setPlayerSearch(`${first.name} (${first.player_id})`);
+        } else {
+          setPlayerId(0);
+          setPlayerSearch("");
         }
-      })
-      .catch((e) => setError(e.message || "Failed to initialize"));
-  }, []);
+      } catch (err) {
+        setPlayers([]);
+        setPlayerId(0);
+        setPlayerSearch("");
+        setError(`Failed to load player list for ${season}: ${err.message}`);
+      }
+    }
+
+    loadPlayers();
+  }, [manifest, season]);
 
   const playerOptions = useMemo(
-    () =>
-      [...players]
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map((p) => ({ ...p, label: `${p.name} (${p.player_id})` })),
+    () => players.map((p) => ({ ...p, label: `${p.name} (${p.player_id})` })),
     [players]
   );
 
@@ -175,28 +190,59 @@ function App() {
     [logoName]
   );
 
-  const seasonOptions = useMemo(
-    () => seasonOptionsFromDefault(health?.default_season || season, 10),
-    [health?.default_season, season]
-  );
+  const seasonOptions = useMemo(() => manifest?.seasons || [season], [manifest, season]);
+
+  async function getSeasonLogs(selectedSeason, selectedSeasonType) {
+    const typeSlug = slugSeasonType(selectedSeasonType);
+    const cacheKey = `${selectedSeason}::${typeSlug}`;
+
+    if (logsCacheRef.current.has(cacheKey)) {
+      return logsCacheRef.current.get(cacheKey);
+    }
+
+    const path =
+      manifest?.files?.gamelogs?.[selectedSeason]?.[typeSlug] ||
+      `gamelogs/${selectedSeason}/${typeSlug}.json`;
+    const payload = await fetchJson(`${DATA_BASE}/${path}`);
+    logsCacheRef.current.set(cacheKey, payload);
+    return payload;
+  }
 
   async function loadTrends() {
     if (!playerId) return;
     setLoading(true);
     setError("");
+
     try {
-      const result = await API.trends(playerId, season, seasonType);
-      if (result.detail) throw new Error(result.detail);
+      const payload = await getSeasonLogs(season, seasonType);
+      const rows = (payload.rows || [])
+        .filter((r) => Number(r.PLAYER_ID) === Number(playerId))
+        .sort((a, b) => new Date(a.GAME_DATE) - new Date(b.GAME_DATE));
 
-      result.rows = (result.rows || []).slice().sort((a, b) => new Date(a.GAME_DATE) - new Date(b.GAME_DATE));
-      setTrendData(result);
+      if (!rows.length) {
+        throw new Error(`No rows for ${selectedPlayer?.name || "player"} in ${season} ${seasonType}`);
+      }
 
-      const preferred = (result.stat_fields || []).includes("PTS") ? "PTS" : (result.stat_fields || [])[0] || "";
+      const statFields = (payload.stat_fields && payload.stat_fields.length ? payload.stat_fields : inferStatFields(rows))
+        .filter((f) => rows.some((r) => isNumericValue(r[f])));
+
+      if (!statFields.length) {
+        throw new Error("No numeric stat fields found in static gamelog data");
+      }
+
+      const preferred = statFields.includes("PTS") ? "PTS" : statFields[0];
       setStatField(preferred);
-    } catch (e) {
-      setError(e.message || "Failed to load trends");
+      setTrendData({
+        season,
+        season_type: seasonType,
+        count: rows.length,
+        rows,
+        stat_fields: statFields
+      });
+    } catch (err) {
       setTrendData(null);
       setStatField("");
+      setError(err.message || "Failed to load trends");
     } finally {
       setLoading(false);
     }
@@ -223,7 +269,9 @@ function App() {
   const chartModel = useMemo(() => {
     if (!trendData?.rows?.length || !statField) return null;
 
-    const rows = trendData.rows.filter((r) => Number.isFinite(Number(r[statField])));
+    const rows = trendData.rows.filter((r) => isNumericValue(r[statField]));
+    if (!rows.length) return null;
+
     const x = rows.map((r) => r.GAME_DATE);
     const y = rows.map((r) => Number(r[statField]));
     const rolling = rollingAverage(y, Math.max(1, Number(rollingWindow) || 1));
@@ -235,7 +283,9 @@ function App() {
           mode: "markers",
           x,
           y,
-          text: rows.map((r) => `${r.MATCHUP || ""}<br>${toDateLabel(r.GAME_DATE)}<br>${statField}: ${Number(r[statField]).toFixed(2)}`),
+          text: rows.map(
+            (r) => `${r.MATCHUP || ""}<br>${toDateLabel(r.GAME_DATE)}<br>${statField}: ${Number(r[statField]).toFixed(2)}`
+          ),
           hovertemplate: "%{text}<extra></extra>",
           marker: {
             size: 11,
@@ -329,8 +379,9 @@ function App() {
             <div>
               <label>Season Type</label>
               <select value={seasonType} onChange={(e) => setSeasonType(e.target.value)}>
-                <option>Regular Season</option>
-                <option>Playoffs</option>
+                {SEASON_TYPES.map((st) => (
+                  <option key={st}>{st}</option>
+                ))}
               </select>
             </div>
 
@@ -376,34 +427,36 @@ function App() {
             "--header-secondary": selectedLogo.secondaryColor
           }}
         >
-        <div className="export-header">
-          <div className="player-side">
-            <img
-              src={selectedPlayer?.headshot_url || FALLBACK_HEADSHOT}
-              alt={selectedPlayer?.name || "Player"}
-              onError={(e) => {
-                e.currentTarget.src = FALLBACK_HEADSHOT;
-              }}
-            />
-          </div>
+          <div className="export-header">
+            <div className="player-side">
+              <img
+                src={selectedPlayer?.headshot_url || FALLBACK_HEADSHOT}
+                alt={selectedPlayer?.name || "Player"}
+                onError={(e) => {
+                  e.currentTarget.src = FALLBACK_HEADSHOT;
+                }}
+              />
+            </div>
 
-          <div className="header-copy">
-            <h1>{selectedPlayer?.name || "NBA Player"}</h1>
-            <h2>{statField || "Stat"} Daily Trend | {season} {seasonType}</h2>
-          </div>
+            <div className="header-copy">
+              <h1>{selectedPlayer?.name || "NBA Player"}</h1>
+              <h2>
+                {statField || "Stat"} Daily Trend | {season} {seasonType}
+              </h2>
+            </div>
 
-          <div className="logo-side">
-            <img
-              className="team-logo"
-              src={selectedLogo.url}
-              alt={selectedLogo.name}
-              crossOrigin="anonymous"
-              onError={(e) => {
-                e.currentTarget.style.display = "none";
-              }}
-            />
+            <div className="logo-side">
+              <img
+                className="team-logo"
+                src={selectedLogo.url}
+                alt={selectedLogo.name}
+                crossOrigin="anonymous"
+                onError={(e) => {
+                  e.currentTarget.style.display = "none";
+                }}
+              />
+            </div>
           </div>
-        </div>
 
           <div className="panel chart-wrap">
             {chartModel ? (

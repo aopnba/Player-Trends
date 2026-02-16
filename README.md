@@ -1,58 +1,60 @@
-# NBA Player Trends
+# NBA Player Trends (Static + Daily Auto-Refresh)
 
-This project now supports a fully public, free Cloudflare deployment where:
+This repo is now set up to run as a **static GitHub Pages app** with **daily NBA data refresh**.
 
-- Frontend is static React (`frontend/`).
-- API is served by Cloudflare Pages Functions (`functions/api/...`).
-- Live data is pulled from `stats.nba.com` using the same endpoint family.
-- Headshots use NBA CDN by `PLAYER_ID` (no laptop file dependency).
+## How it works
 
-## Local Run
+- Frontend: React/Vite in `frontend/`
+- Static data files: `frontend/public/data/`
+- Daily refresh job: `.github/workflows/update-static-data.yml`
+- Pages deploy job: `.github/workflows/deploy-pages.yml`
 
-Backend (FastAPI) and frontend dev server:
+At ~4:00 AM ET each day, GitHub Actions pulls fresh NBA data and commits updated JSON files.
+A push triggers GitHub Pages deploy automatically.
+
+## Data source endpoints used in the refresh script
+
+- `commonallplayers`
+- `leaguegamelog`
+
+Script path:
+
+- `scripts/build_static_data.py`
+
+## Local frontend run
 
 ```bash
-cd "/Users/atticusobp/Desktop/player_headshots_26 copy"
-./run_local.sh
+cd "/Users/atticusobp/Desktop/player_headshots_26 copy/frontend"
+npm ci
+npm run dev
 ```
 
-Stop:
-
-```bash
-./stop_local.sh
-```
-
-Local frontend URL:
+Local URL:
 
 - `http://127.0.0.1:5173`
 
-## Cloudflare Deploy (Free)
+## Manual data refresh (local)
 
-1. Push this repo to GitHub.
-2. In Cloudflare Dashboard: `Workers & Pages` -> `Create` -> `Pages` -> `Connect to Git`.
-3. Select repo `aopnba/Player-Trends`.
-4. Build settings:
-- Framework preset: `Vite`
-- Build command: `cd frontend && npm ci && npm run build`
-- Build output directory: `frontend/dist`
-- Root directory: repo root (leave blank)
-5. Functions directory:
-- Set to `functions`
-6. Deploy.
+```bash
+cd "/Users/atticusobp/Desktop/player_headshots_26 copy"
+python3 -m pip install -r scripts/requirements-static.txt
+python3 scripts/build_static_data.py --output frontend/public/data
+```
 
-The frontend and API will share the same domain, and frontend calls `/api/...` directly.
+## GitHub setup checklist
 
-## Password Protect Team Access
+1. Keep repo on `main`.
+2. In GitHub, enable Pages for this repo.
+   - Source: `GitHub Actions`
+3. (Optional) Run `Update Static NBA Data` workflow manually once to seed full data immediately.
+4. Wait for `Deploy Frontend to GitHub Pages` workflow to finish.
 
-Use Cloudflare Zero Trust Access:
+Your live app URL should be:
 
-1. Open Cloudflare Zero Trust.
-2. `Access` -> `Applications` -> `Add application` -> `Self-hosted`.
-3. Application domain: your Pages URL.
-4. Policy: allow only your team emails (or your email domain).
+- `https://aopnba.github.io/Player-Trends/`
 
-## API Routes (Cloudflare Functions)
+## Notes
 
-- `GET /api/health`
-- `GET /api/players?season=2025-26`
-- `GET /api/trends/player?player_id=203507&source=overall&season=2025-26&season_type=Regular%20Season`
+- Headshots are pulled from NBA CDN by `player_id`.
+- If NBA rate-limits a refresh run, the action retries HTTP requests automatically.
+- The schedule uses two UTC runs and only executes at actual 4:00 AM New York time.
