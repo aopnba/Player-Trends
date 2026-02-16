@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: player-trends-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DEFAULT_SEASON
+        value: 2025-26
+      - key: CACHE_TTL_SECONDS
+        value: 21600
+      - key: HEADSHOT_DIR
+        value: /tmp/headshots
+      - key: TEAM_LOGO_DIR
+        value: /tmp/team-logos

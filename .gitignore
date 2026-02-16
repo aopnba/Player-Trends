@@ -1,0 +1,10 @@
+.DS_Store
+.cache/
+.run/
+__pycache__/
+*.pyc
+backend/.venv/
+backend/.env
+frontend/node_modules/
+frontend/dist/
+player_*_26.jpg
