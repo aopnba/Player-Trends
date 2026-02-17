@@ -533,7 +533,8 @@ function App() {
           style={{
             "--header-font": selectedLogo.headerFont,
             "--header-primary": selectedLogo.primaryColor,
-            "--header-secondary": selectedLogo.secondaryColor
+            "--header-secondary": selectedLogo.secondaryColor,
+            "--header-text-transform": selectedLogo.name === "PHNX Suns Podcast" ? "lowercase" : "uppercase"
           }}
         >
           <div className="export-header" ref={headerRef}>

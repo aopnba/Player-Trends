@@ -89,7 +89,7 @@ body {
   line-height: 1.05;
   font-family: var(--header-font, "Cooper Black", "Cooper Std", Georgia, serif);
   color: var(--header-primary, #0f172a);
-  text-transform: uppercase;
+  text-transform: var(--header-text-transform, uppercase);
 }
 
 .header-copy h2 {
@@ -98,7 +98,7 @@ body {
   font-family: var(--header-font, "Cooper Black", "Cooper Std", Georgia, serif);
   color: var(--header-secondary, #334155);
   font-weight: 400;
-  text-transform: uppercase;
+  text-transform: var(--header-text-transform, uppercase);
 }
 
 .player-side {
