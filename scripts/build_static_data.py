@@ -87,46 +87,23 @@ def _extract_leaguegamelog_rows(payload: dict[str, Any]) -> list[dict[str, Any]]
 
 def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type: str) -> list[dict[str, Any]]:
     url = f"{NBA_BASE}/leaguegamelog"
-    all_rows: list[dict[str, Any]] = []
-    seen_ids: set[tuple[int, str]] = set()
-
-    # Counter pagination: keep pulling until no new rows.
-    for counter in range(0, 80):
-        params = {
-            "Counter": 1000 + counter,
-            "DateFrom": "",
-            "DateTo": "",
-            "Direction": "ASC",
-            "LeagueID": "00",
-            "PlayerOrTeam": "P",
-            "Season": season,
-            "SeasonType": season_type,
-            "Sorter": "DATE",
-        }
-        resp = session.get(url, params=params, timeout=60)
-        resp.raise_for_status()
-        payload = resp.json()
-        rows = _extract_leaguegamelog_rows(payload)
-        if not rows:
-            print(f"[build] counter {counter}: 0 rows, stopping", flush=True)
-            break
-
-        before = len(seen_ids)
-        for rec in rows:
-            pid = int(rec.get("PLAYER_ID") or 0)
-            gid = str(rec.get("GAME_ID") or "")
-            key = (pid, gid)
-            if pid > 0 and gid:
-                if key in seen_ids:
-                    continue
-                seen_ids.add(key)
-            all_rows.append(rec)
-        added = len(seen_ids) - before
-        print(f"[build] counter {counter}: rows={len(rows)} new={added}", flush=True)
-        if added == 0:
-            break
-
-    return all_rows
+    params = {
+        "Counter": 1000,
+        "DateFrom": None,
+        "DateTo": None,
+        "Direction": "DESC",
+        "LeagueID": "00",
+        "PlayerOrTeam": "P",
+        "Season": season,
+        "SeasonType": season_type,
+        "Sorter": "DATE",
+    }
+    resp = session.get(url, params=params, timeout=60)
+    resp.raise_for_status()
+    payload = resp.json()
+    rows = _extract_leaguegamelog_rows(payload)
+    print(f"[build] counter=1000 rows={len(rows)}", flush=True)
+    return rows
 
 
 def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
