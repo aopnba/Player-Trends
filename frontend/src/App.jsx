@@ -5,6 +5,8 @@ import { toPng } from "html-to-image";
 const ASSET_BASE = import.meta.env.BASE_URL || "/";
 const DATA_BASE = `${ASSET_BASE}data`;
 const FALLBACK_HEADSHOT = "https://cdn.nba.com/headshots/nba/latest/260x190/fallback.png";
+const TRANSPARENT_PIXEL =
+  "data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA=";
 
 const PODCAST_LOGOS = [
   {
@@ -77,6 +79,22 @@ function toDateLabel(value) {
 
 function isNumericValue(value) {
   return Number.isFinite(Number(value));
+}
+
+async function blobToDataUrl(blob) {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result || ""));
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function fetchImageAsDataUrl(url) {
+  const response = await fetch(url, { mode: "cors", cache: "no-store" });
+  if (!response.ok) throw new Error(`Image fetch failed: ${response.status}`);
+  const blob = await response.blob();
+  return blobToDataUrl(blob);
 }
 
 function inferStatFields(rows) {
@@ -250,11 +268,30 @@ function App() {
 
   async function exportPng() {
     if (!exportRef.current) return;
+    let exportNode = null;
     try {
-      const dataUrl = await toPng(exportRef.current, {
+      exportNode = exportRef.current.cloneNode(true);
+      exportNode.style.position = "fixed";
+      exportNode.style.left = "-10000px";
+      exportNode.style.top = "0";
+      exportNode.style.zIndex = "-1";
+      document.body.appendChild(exportNode);
+
+      const headshotInClone = exportNode.querySelector(".player-side img");
+      if (headshotInClone) {
+        try {
+          const dataUrl = await fetchImageAsDataUrl(selectedPlayer?.headshot_url || FALLBACK_HEADSHOT);
+          headshotInClone.src = dataUrl;
+        } catch {
+          headshotInClone.src = TRANSPARENT_PIXEL;
+        }
+      }
+
+      const dataUrl = await toPng(exportNode, {
         pixelRatio: 3,
         cacheBust: true,
-        backgroundColor: "#f8fafc"
+        backgroundColor: "#f8fafc",
+        imagePlaceholder: TRANSPARENT_PIXEL
       });
 
       const link = document.createElement("a");
@@ -262,7 +299,11 @@ function App() {
       link.href = dataUrl;
       link.click();
     } catch (err) {
-      setError(`Export failed: ${err?.message || err}`);
+      setError(`Export failed: ${err?.message || String(err)}`);
+    } finally {
+      if (exportNode && exportNode.parentNode) {
+        exportNode.parentNode.removeChild(exportNode);
+      }
     }
   }
 
@@ -432,6 +473,8 @@ function App() {
               <img
                 src={selectedPlayer?.headshot_url || FALLBACK_HEADSHOT}
                 alt={selectedPlayer?.name || "Player"}
+                crossOrigin="anonymous"
+                referrerPolicy="no-referrer"
                 onError={(e) => {
                   e.currentTarget.src = FALLBACK_HEADSHOT;
                 }}
@@ -451,6 +494,7 @@ function App() {
                 src={selectedLogo.url}
                 alt={selectedLogo.name}
                 crossOrigin="anonymous"
+                referrerPolicy="no-referrer"
                 onError={(e) => {
                   e.currentTarget.style.display = "none";
                 }}
