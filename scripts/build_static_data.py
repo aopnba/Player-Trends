@@ -5,7 +5,7 @@ import argparse
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -85,12 +85,19 @@ def _extract_leaguegamelog_rows(payload: dict[str, Any]) -> list[dict[str, Any]]
     return rows
 
 
-def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type: str) -> list[dict[str, Any]]:
+def _leaguegamelog_request(
+    session: requests.Session,
+    season: str,
+    season_type: str,
+    counter: int,
+    date_from: str | None,
+    date_to: str | None,
+) -> list[dict[str, Any]]:
     url = f"{NBA_BASE}/leaguegamelog"
     params = {
-        "Counter": 1000,
-        "DateFrom": None,
-        "DateTo": None,
+        "Counter": counter,
+        "DateFrom": date_from,
+        "DateTo": date_to,
         "Direction": "DESC",
         "LeagueID": "00",
         "PlayerOrTeam": "P",
@@ -101,9 +108,76 @@ def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type:
     resp = session.get(url, params=params, timeout=60)
     resp.raise_for_status()
     payload = resp.json()
-    rows = _extract_leaguegamelog_rows(payload)
-    print(f"[build] counter=1000 rows={len(rows)}", flush=True)
-    return rows
+    return _extract_leaguegamelog_rows(payload)
+
+
+def _season_bounds(season: str, season_type: str) -> tuple[date, date]:
+    # Conservative windows by NBA calendar for fallback day-sliced pulls.
+    start_year = int(season.split("-")[0])
+    end_year = start_year + 1
+    if season_type == "Playoffs":
+        start = date(end_year, 4, 1)
+        end = date(end_year, 7, 31)
+    else:
+        start = date(start_year, 10, 1)
+        end = date(end_year, 6, 30)
+
+    today = datetime.now(timezone.utc).date()
+    if end > today:
+        end = today
+    return start, end
+
+
+def _unique_player_count(rows: list[dict[str, Any]]) -> int:
+    return len({int(r.get("PLAYER_ID") or 0) for r in rows if r.get("PLAYER_ID") is not None})
+
+
+def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type: str) -> list[dict[str, Any]]:
+    rows = _leaguegamelog_request(
+        session=session,
+        season=season,
+        season_type=season_type,
+        counter=1000,
+        date_from=None,
+        date_to=None,
+    )
+    unique_players = _unique_player_count(rows)
+    print(
+        f"[build] one-shot counter=1000 rows={len(rows)} unique_players={unique_players}",
+        flush=True,
+    )
+    if season_type == "Playoffs":
+        return rows
+    if unique_players >= 200:
+        return rows
+
+    print(
+        "[build] one-shot pull appears partial, switching to day-sliced LeagueGameLog fallback",
+        flush=True,
+    )
+    start, end = _season_bounds(season, season_type)
+    all_rows: list[dict[str, Any]] = []
+    current = start
+    while current <= end:
+        day = current.strftime("%m/%d/%Y")
+        day_rows = _leaguegamelog_request(
+            session=session,
+            season=season,
+            season_type=season_type,
+            counter=1000,
+            date_from=day,
+            date_to=day,
+        )
+        if day_rows:
+            all_rows.extend(day_rows)
+        current += timedelta(days=1)
+
+    all_rows = dedupe_rows(all_rows)
+    print(
+        f"[build] fallback day-sliced rows={len(all_rows)} unique_players={_unique_player_count(all_rows)}",
+        flush=True,
+    )
+    return all_rows
 
 
 def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
