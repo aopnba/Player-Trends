@@ -2,8 +2,8 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig(({ command }) => ({
-  // Use relative paths in production so the app works on GitHub Pages and custom hosts.
-  base: command === "build" ? "./" : "/",
+  // Set VITE_BASE_PATH=/Player-Trends/ only for GitHub Pages builds.
+  base: command === "build" ? process.env.VITE_BASE_PATH || "/" : "/",
   plugins: [react()],
   server: {
     port: 5173,

@@ -1,12 +1,6 @@
 name: Update Static NBA Data
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "scripts/build_static_data.py"
-      - "scripts/requirements-static.txt"
-      - ".github/workflows/update-static-data.yml"
   schedule:
     - cron: "0 8 * * *"
     - cron: "0 9 * * *"
@@ -15,15 +9,9 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: static-data-refresh
-  cancel-in-progress: true
-
 jobs:
   update-data:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 360
 
     steps:
       - name: Checkout
@@ -38,7 +26,7 @@ jobs:
         id: gate
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -60,7 +48,7 @@ jobs:
       - name: Build static data
         if: steps.gate.outputs.run == 'true'
         env:
-          STATIC_SEASONS: "2025-26"
+          STATIC_SEASONS: "2025-26,2024-25,2023-24"
           DEFAULT_SEASON: "2025-26"
         run: |
           python scripts/build_static_data.py --output frontend/public/data
