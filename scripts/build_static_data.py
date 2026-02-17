@@ -136,6 +136,19 @@ def _load_existing_rows(path: Path) -> list[dict[str, Any]]:
     return []
 
 
+def _load_existing_players(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        players = payload.get("players", [])
+        if isinstance(players, list):
+            return players
+    except Exception:
+        return []
+    return []
+
+
 def build_gamelogs_for_season_type(
     season: str,
     season_type: str,
@@ -236,7 +249,19 @@ def main() -> None:
 
     for season in seasons:
         print(f"[build] loading players for {season}", flush=True)
-        all_players = fetch_players(season)
+        players_rel = f"players/{season}.json"
+        existing_players = _load_existing_players(output_root / players_rel)
+        try:
+            all_players = fetch_players(season)
+        except Exception as exc:
+            if existing_players:
+                print(
+                    f"[warn] commonallplayers failed for {season}; reusing existing players snapshot: {exc}",
+                    flush=True,
+                )
+                all_players = existing_players
+            else:
+                raise
         active_player_ids = sorted(
             {
                 int(p.get("player_id") or 0)
@@ -265,7 +290,6 @@ def main() -> None:
                 regular_rows = payload["rows"]
 
         players_payload = build_players_payload(season, all_players, regular_rows)
-        players_rel = f"players/{season}.json"
         dump_json(output_root / players_rel, players_payload)
         files_players[season] = players_rel
 
