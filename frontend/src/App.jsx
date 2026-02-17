@@ -500,8 +500,6 @@ function App() {
               <img
                 src={selectedPlayer?.headshot_url || FALLBACK_HEADSHOT}
                 alt={selectedPlayer?.name || "Player"}
-                crossOrigin="anonymous"
-                referrerPolicy="no-referrer"
                 onError={(e) => {
                   e.currentTarget.src = FALLBACK_HEADSHOT;
                 }}
@@ -520,8 +518,6 @@ function App() {
                 className="team-logo"
                 src={selectedLogo.url}
                 alt={selectedLogo.name}
-                crossOrigin="anonymous"
-                referrerPolicy="no-referrer"
                 onError={(e) => {
                   e.currentTarget.style.display = "none";
                 }}
