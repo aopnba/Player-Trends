@@ -1,12 +1,6 @@
 name: Update Static NBA Data
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "scripts/build_static_data.py"
-      - "scripts/requirements-static.txt"
-      - ".github/workflows/update-static-data.yml"
   schedule:
     - cron: "0 8 * * *"
     - cron: "0 9 * * *"
@@ -23,7 +17,7 @@ jobs:
   update-data:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
@@ -38,7 +32,7 @@ jobs:
         id: gate
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi

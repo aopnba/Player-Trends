@@ -6,18 +6,17 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
-from nba_api.stats.endpoints import commonallplayers, playergamelogs
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 NBA_BASE = "https://stats.nba.com/stats"
+DEFAULT_SEASONS = ["2025-26"]
 SEASON_TYPES = ["Regular Season", "Playoffs"]
-DEFAULT_SEASONS = ["2025-26", "2024-25", "2023-24"]
 
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -35,17 +34,13 @@ HEADERS = {
 }
 
 
-def season_type_slug(value: str) -> str:
-    return re.sub(r"\s+", "-", value.strip().lower())
-
-
 def make_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
-        total=2,
-        read=2,
-        connect=2,
-        backoff_factor=0.6,
+        total=4,
+        read=4,
+        connect=4,
+        backoff_factor=0.8,
         status_forcelist=[429, 500, 502, 503, 504, 520, 522, 524],
         allowed_methods=["GET"],
     )
@@ -56,312 +51,8 @@ def make_session() -> requests.Session:
     return session
 
 
-def fetch_endpoint(session: requests.Session, endpoint: str, params: dict[str, Any], timeout: int = 40) -> dict[str, Any]:
-    url = f"{NBA_BASE}/{endpoint}"
-    response = session.get(url, params=params, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
-
-
-def extract_rows(payload: dict[str, Any], set_name: str | None = None) -> list[dict[str, Any]]:
-    if "resultSets" in payload and payload["resultSets"]:
-        sets = payload["resultSets"]
-        selected = sets[0]
-        if set_name:
-            for candidate in sets:
-                if str(candidate.get("name", "")).lower() == set_name.lower():
-                    selected = candidate
-                    break
-        headers = selected.get("headers", [])
-        row_set = selected.get("rowSet", [])
-    else:
-        selected = payload.get("resultSet", {})
-        headers = selected.get("headers", [])
-        row_set = selected.get("rowSet", [])
-
-    rows: list[dict[str, Any]] = []
-    for row in row_set:
-        record = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
-        rows.append(record)
-    return rows
-
-
-def to_float(value: Any) -> float | None:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    if out != out:
-        return None
-    return out
-
-
-def infer_stat_fields(rows: list[dict[str, Any]]) -> list[str]:
-    if not rows:
-        return []
-
-    blacklist = {"PLAYER_ID", "TEAM_ID", "GAME_ID", "GAME_DATE_EST"}
-    out: list[str] = []
-    for key in rows[0].keys():
-        if key in blacklist or key.endswith("_RANK"):
-            continue
-        if any(to_float(row.get(key)) is not None for row in rows):
-            out.append(key)
-    return sorted(set(out))
-
-
-def build_players(session: requests.Session, season: str, output_root: Path) -> dict[str, Any]:
-    try:
-        endpoint = commonallplayers.CommonAllPlayers(
-            is_only_current_season=1,
-            season=season,
-            timeout=45,
-        )
-        frames = endpoint.get_data_frames()
-        if not frames:
-            raise RuntimeError("No frames returned from commonallplayers")
-        rows = frames[0].to_dict(orient="records")
-        players = []
-        for row in rows:
-            try:
-                player_id = int(row.get("PERSON_ID"))
-            except (TypeError, ValueError):
-                continue
-            players.append(
-                {
-                    "player_id": player_id,
-                    "name": row.get("DISPLAY_FIRST_LAST"),
-                    "team_id": row.get("TEAM_ID"),
-                    "team": row.get("TEAM_ABBREVIATION"),
-                    "is_active": int(row.get("ROSTERSTATUS") or 0) == 1,
-                    "headshot_url": f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player_id}.png",
-                }
-            )
-
-        players.sort(key=lambda x: (x["name"] or "", x["player_id"]))
-        return {
-            "season": season,
-            "count": len(players),
-            "players": players,
-        }
-    except Exception as exc:
-        fallback_path = output_root / "players" / f"{season}.json"
-        if fallback_path.exists():
-            print(
-                f"[warn] commonallplayers failed for {season}, using cached players file: {exc}",
-                flush=True,
-            )
-            return json.loads(fallback_path.read_text(encoding="utf-8"))
-        raise
-
-
-def build_gamelogs_league(session: requests.Session, season: str, season_type: str) -> list[dict[str, Any]]:
-    payload = fetch_endpoint(
-        session,
-        "leaguegamelog",
-        {
-            "Counter": 0,
-            "DateFrom": "",
-            "DateTo": "",
-            "Direction": "ASC",
-            "LeagueID": "00",
-            "PlayerOrTeam": "P",
-            "Season": season,
-            "SeasonType": season_type,
-            "Sorter": "DATE",
-        },
-        timeout=70,
-    )
-    rows = extract_rows(payload, "LeagueGameLog")
-    for row in rows:
-        if "PLAYER_ID" in row:
-            continue
-        if "Player_ID" in row:
-            row["PLAYER_ID"] = row.get("Player_ID")
-    return rows
-
-
-def build_gamelogs_per_player(
-    session: requests.Session,
-    season: str,
-    season_type: str,
-    player_ids: list[int],
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    total = len(player_ids)
-    for idx, player_id in enumerate(player_ids, start=1):
-        # Progress every 25 players so Actions logs show forward movement.
-        if idx == 1 or idx % 25 == 0 or idx == total:
-            print(f"[build] playergamelog {season} {season_type}: {idx}/{total}", flush=True)
-
-        player_rows: list[dict[str, Any]] = []
-        last_exc = None
-        for attempt in range(1, 4):
-            try:
-                endpoint = playergamelogs.PlayerGameLogs(
-                    player_id_nullable=player_id,
-                    season_nullable=season,
-                    season_type_nullable=season_type,
-                    timeout=35,
-                )
-                frames = endpoint.get_data_frames()
-                if frames:
-                    player_rows = frames[0].to_dict(orient="records")
-                break
-            except Exception as exc:
-                last_exc = exc
-                time.sleep(min(0.8 * attempt, 2.0))
-        if not player_rows and last_exc is not None:
-            print(f"[warn] playergamelogs failed for {player_id}: {last_exc}", flush=True)
-            continue
-
-        for row in player_rows:
-            if "PLAYER_ID" not in row:
-                row["PLAYER_ID"] = player_id
-        rows.extend(player_rows)
-        time.sleep(0.08)
-    return rows
-
-
-def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[tuple[int, str]] = set()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        pid = int(row.get("PLAYER_ID") or 0)
-        game_id = str(row.get("GAME_ID") or "")
-        key = (pid, game_id)
-        if pid <= 0 or not game_id:
-            # Keep imperfect rows so we do not silently drop data shape.
-            out.append(row)
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(row)
-    return out
-
-
-def season_start_date(season: str) -> str:
-    m = re.match(r"^(\d{4})-", season or "")
-    if not m:
-        return "2025-10-01"
-    return f"{m.group(1)}-10-01"
-
-
-def ensure_player_rows(
-    rows: list[dict[str, Any]],
-    players_payload: dict[str, Any],
-    season: str,
-    season_type: str,
-) -> list[dict[str, Any]]:
-    # Guarantee at least one row per active player to avoid "No rows" UX failures.
-    if season_type != "Regular Season":
-        return rows
-
-    by_id = {int(r.get("PLAYER_ID") or 0) for r in rows if r.get("PLAYER_ID") is not None}
-    out = list(rows)
-    start_date = season_start_date(season)
-
-    for p in players_payload.get("players", []):
-        pid = int(p.get("player_id") or 0)
-        if not p.get("is_active") or pid <= 0 or pid in by_id:
-            continue
-        out.append(
-            {
-                "SEASON_YEAR": season,
-                "PLAYER_ID": pid,
-                "PLAYER_NAME": p.get("name"),
-                "TEAM_ID": p.get("team_id"),
-                "TEAM_ABBREVIATION": p.get("team"),
-                "TEAM_NAME": "",
-                "GAME_ID": f"NO_GAME_{pid}",
-                "GAME_DATE": start_date,
-                "MATCHUP": "NO GAMES YET",
-                "WL": "",
-                "MIN": 0,
-                "FGM": 0,
-                "FGA": 0,
-                "FG_PCT": 0,
-                "FG3M": 0,
-                "FG3A": 0,
-                "FG3_PCT": 0,
-                "FTM": 0,
-                "FTA": 0,
-                "FT_PCT": 0,
-                "OREB": 0,
-                "DREB": 0,
-                "REB": 0,
-                "AST": 0,
-                "TOV": 0,
-                "STL": 0,
-                "BLK": 0,
-                "PF": 0,
-                "PTS": 0,
-                "PLUS_MINUS": 0,
-                "IS_PLACEHOLDER": 1,
-            }
-        )
-    return out
-
-
-def build_gamelogs(session: requests.Session, season: str, season_type: str, players_payload: dict[str, Any]) -> dict[str, Any]:
-    players = players_payload.get("players", [])
-    active_player_ids = [int(p.get("player_id") or 0) for p in players if bool(p.get("is_active")) and p.get("player_id")]
-    active_player_ids = sorted({pid for pid in active_player_ids if pid > 0})
-
-    print(f"[build] playergamelogs {season} {season_type}: {len(active_player_ids)} active players", flush=True)
-    rows = build_gamelogs_per_player(session, season, season_type, active_player_ids)
-
-    rows = dedupe_rows(rows)
-    rows = ensure_player_rows(rows, players_payload, season, season_type)
-    rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
-    stat_fields = infer_stat_fields(rows)
-
-    return {
-        "season": season,
-        "season_type": season_type,
-        "count": len(rows),
-        "stat_fields": stat_fields,
-        "rows": rows,
-    }
-
-
-def validate_coverage(
-    season: str,
-    season_type: str,
-    players_payload: dict[str, Any],
-    gamelog_payload: dict[str, Any],
-) -> None:
-    """Fail the build if static gamelog coverage is clearly incomplete."""
-    players = players_payload.get("players", [])
-    rows = gamelog_payload.get("rows", [])
-    row_player_ids = {int(r.get("PLAYER_ID") or 0) for r in rows if r.get("PLAYER_ID") is not None}
-
-    # Only check active players in regular season.
-    if season_type != "Regular Season":
-        return
-
-    active_player_ids = {
-        int(p.get("player_id") or 0)
-        for p in players
-        if bool(p.get("is_active")) and p.get("player_id") is not None
-    }
-    covered = len(active_player_ids & row_player_ids)
-    active_total = len(active_player_ids)
-    coverage = (covered / active_total) if active_total else 0.0
-
-    # Threshold to avoid publishing obviously partial builds.
-    if covered < 50 or coverage < 0.15:
-        raise RuntimeError(
-            f"Incomplete gamelog coverage for {season} {season_type}: "
-            f"{covered}/{active_total} active players with rows ({coverage:.1%}). "
-            "Aborting publish to avoid shipping partial data."
-        )
-
-
-def dump_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+def season_type_slug(value: str) -> str:
+    return re.sub(r"\s+", "-", value.strip().lower())
 
 
 def parse_seasons(raw: str | None) -> list[str]:
@@ -371,47 +62,224 @@ def parse_seasons(raw: str | None) -> list[str]:
     return out or DEFAULT_SEASONS
 
 
+def season_start_year(season: str) -> int:
+    m = re.match(r"^(\d{4})-\d{2}$", season)
+    if not m:
+        raise ValueError(f"Invalid season format: {season}")
+    return int(m.group(1))
+
+
+def season_window(season: str, season_type: str) -> tuple[date, date]:
+    start_year = season_start_year(season)
+    end_year = start_year + 1
+    today = datetime.now(timezone.utc).date()
+
+    if season_type == "Playoffs":
+        start = date(end_year, 4, 1)
+        end = min(today, date(end_year, 7, 1))
+    else:
+        start = date(start_year, 10, 1)
+        end = min(today, date(end_year, 4, 20))
+
+    if end < start:
+        end = start
+    return start, end
+
+
+def fetch_leaguegamelog_day(session: requests.Session, season: str, season_type: str, d: date) -> list[dict[str, Any]]:
+    url = f"{NBA_BASE}/leaguegamelog"
+    date_str = d.strftime("%m/%d/%Y")
+    params = {
+        "Counter": 0,
+        "DateFrom": date_str,
+        "DateTo": date_str,
+        "Direction": "ASC",
+        "LeagueID": "00",
+        "PlayerOrTeam": "P",
+        "Season": season,
+        "SeasonType": season_type,
+        "Sorter": "DATE",
+    }
+    resp = session.get(url, params=params, timeout=45)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    result_sets = payload.get("resultSets") or []
+    if result_sets:
+        selected = result_sets[0]
+        for rs in result_sets:
+            if str(rs.get("name", "")).lower() == "leaguegamelog":
+                selected = rs
+                break
+        headers = selected.get("headers", [])
+        row_set = selected.get("rowSet", [])
+    else:
+        rs = payload.get("resultSet", {})
+        headers = rs.get("headers", [])
+        row_set = rs.get("rowSet", [])
+
+    rows: list[dict[str, Any]] = []
+    for row in row_set:
+        rec = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
+        if "PLAYER_ID" not in rec and "Player_ID" in rec:
+            rec["PLAYER_ID"] = rec.get("Player_ID")
+        rows.append(rec)
+    return rows
+
+
+def daterange(start: date, end: date):
+    cur = start
+    while cur <= end:
+        yield cur
+        cur += timedelta(days=1)
+
+
+def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[int, str]] = set()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        pid = int(r.get("PLAYER_ID") or 0)
+        gid = str(r.get("GAME_ID") or "")
+        if pid > 0 and gid:
+            key = (pid, gid)
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(r)
+    return out
+
+
+def infer_stat_fields(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return []
+    blacklist = {"PLAYER_ID", "TEAM_ID", "GAME_ID"}
+    keys = set()
+    for r in rows:
+        keys.update(r.keys())
+    out: list[str] = []
+    for k in sorted(keys):
+        if k in blacklist or k.endswith("_RANK"):
+            continue
+        numeric = False
+        for r in rows:
+            v = r.get(k)
+            try:
+                float(v)
+                numeric = True
+                break
+            except (TypeError, ValueError):
+                continue
+        if numeric:
+            out.append(k)
+    return out
+
+
+def build_players_from_rows(season: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    # Use latest seen row per player to capture current team assignment.
+    by_id: dict[int, dict[str, Any]] = {}
+
+    def dt_key(x: dict[str, Any]) -> str:
+        return str(x.get("GAME_DATE") or "")
+
+    for r in sorted(rows, key=dt_key):
+        try:
+            pid = int(r.get("PLAYER_ID"))
+        except (TypeError, ValueError):
+            continue
+        by_id[pid] = {
+            "player_id": pid,
+            "name": r.get("PLAYER_NAME"),
+            "team_id": r.get("TEAM_ID"),
+            "team": r.get("TEAM_ABBREVIATION"),
+            "is_active": True,
+            "headshot_url": f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png",
+        }
+
+    players = sorted(by_id.values(), key=lambda x: (x.get("name") or "", x["player_id"]))
+    return {"season": season, "count": len(players), "players": players}
+
+
+def dump_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+
+
+def build_season_type(session: requests.Session, season: str, season_type: str) -> dict[str, Any]:
+    start, end = season_window(season, season_type)
+    all_rows: list[dict[str, Any]] = []
+    failed_days: list[str] = []
+
+    days = list(daterange(start, end))
+    total_days = len(days)
+    print(f"[build] {season} {season_type}: {start} -> {end} ({total_days} days)", flush=True)
+
+    for idx, d in enumerate(days, start=1):
+        if idx == 1 or idx % 20 == 0 or idx == total_days:
+            print(f"[build] day {idx}/{total_days} {d}", flush=True)
+        try:
+            rows = fetch_leaguegamelog_day(session, season, season_type, d)
+            all_rows.extend(rows)
+        except Exception as exc:
+            failed_days.append(f"{d} ({exc})")
+        time.sleep(0.08)
+
+    all_rows = dedupe_rows(all_rows)
+    all_rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
+    stat_fields = infer_stat_fields(all_rows)
+
+    if failed_days:
+        print(f"[warn] failed days for {season} {season_type}: {len(failed_days)}", flush=True)
+        for item in failed_days[:10]:
+            print(f"[warn] {item}", flush=True)
+
+    return {
+        "season": season,
+        "season_type": season_type,
+        "count": len(all_rows),
+        "stat_fields": stat_fields,
+        "rows": all_rows,
+        "failed_days": failed_days,
+    }
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build static NBA data files for GitHub Pages")
+    parser = argparse.ArgumentParser(description="Build static NBA data files using LeagueGameLog")
     parser.add_argument("--output", default="frontend/public/data", help="Output data directory")
-    parser.add_argument("--seasons", default=os.getenv("STATIC_SEASONS", ""), help="Comma separated seasons")
+    parser.add_argument("--seasons", default=os.getenv("STATIC_SEASONS", ""), help="Comma-separated seasons")
     parser.add_argument("--default-season", default=os.getenv("DEFAULT_SEASON", "2025-26"))
     args = parser.parse_args()
 
     seasons = parse_seasons(args.seasons)
     output_root = Path(args.output).resolve()
-
     session = make_session()
+
     files_players: dict[str, str] = {}
     files_gamelogs: dict[str, dict[str, str]] = {}
 
     for season in seasons:
-        print(f"[build] players {season}", flush=True)
-        players_payload = build_players(session, season, output_root)
+        files_gamelogs[season] = {}
+        season_rows_for_players: list[dict[str, Any]] = []
+
+        for season_type in SEASON_TYPES:
+            slug = season_type_slug(season_type)
+            payload = build_season_type(session, season, season_type)
+            rel = f"gamelogs/{season}/{slug}.json"
+            dump_json(output_root / rel, payload)
+            files_gamelogs[season][slug] = rel
+            if season_type == "Regular Season":
+                season_rows_for_players.extend(payload["rows"])
+
+        players_payload = build_players_from_rows(season, season_rows_for_players)
         players_rel = f"players/{season}.json"
         dump_json(output_root / players_rel, players_payload)
         files_players[season] = players_rel
-
-        files_gamelogs[season] = {}
-        for season_type in SEASON_TYPES:
-            slug = season_type_slug(season_type)
-            print(f"[build] gamelogs {season} {season_type}", flush=True)
-            gamelog_payload = build_gamelogs(session, season, season_type, players_payload)
-            validate_coverage(season, season_type, players_payload, gamelog_payload)
-            rel = f"gamelogs/{season}/{slug}.json"
-            dump_json(output_root / rel, gamelog_payload)
-            files_gamelogs[season][slug] = rel
-            time.sleep(1.5)
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "default_season": args.default_season if args.default_season in seasons else seasons[0],
         "seasons": seasons,
         "season_types": SEASON_TYPES,
-        "files": {
-            "players": files_players,
-            "gamelogs": files_gamelogs,
-        },
+        "files": {"players": files_players, "gamelogs": files_gamelogs},
     }
     dump_json(output_root / "manifest.json", manifest)
     print("[build] done", flush=True)
