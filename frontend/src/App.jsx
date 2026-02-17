@@ -89,8 +89,6 @@ function inferStatFields(rows) {
   });
 }
 
-const DEFAULT_STAT_FIELDS = ["PTS", "REB", "AST", "STL", "BLK", "TOV", "FGM", "FGA", "FG3M", "FG3A", "FTM", "FTA"];
-
 function withHeadshot(player) {
   const pid = Number(player?.player_id || 0);
   const raw = String(player?.headshot_url || "");
@@ -217,25 +215,15 @@ function App() {
 
     try {
       const payload = await getSeasonLogs(season, seasonType);
-      let rows = (payload.rows || [])
+      const rows = (payload.rows || [])
         .filter((r) => Number(r.PLAYER_ID) === Number(playerId))
         .sort((a, b) => new Date(a.GAME_DATE) - new Date(b.GAME_DATE));
 
       if (!rows.length) {
-        const dateHint = season?.startsWith("2025") ? "2025-10-01" : `${season.slice(0, 4)}-10-01`;
-        const placeholder = {
-          PLAYER_ID: Number(playerId),
-          PLAYER_NAME: selectedPlayer?.name || "PLAYER",
-          GAME_DATE: dateHint,
-          MATCHUP: "NO GAMES YET"
-        };
-        for (const field of DEFAULT_STAT_FIELDS) placeholder[field] = 0;
-        rows = [placeholder];
+        throw new Error(`No rows for ${selectedPlayer?.name || "player"} in ${season} ${seasonType}`);
       }
 
       const statFields = (payload.stat_fields && payload.stat_fields.length ? payload.stat_fields : inferStatFields(rows))
-        .concat(DEFAULT_STAT_FIELDS)
-        .filter((f, idx, arr) => arr.indexOf(f) === idx)
         .filter((f) => rows.some((r) => isNumericValue(r[f])));
 
       if (!statFields.length) {

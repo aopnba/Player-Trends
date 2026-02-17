@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from nba_api.stats.endpoints import leaguegamelog
 from nba_api.stats.static import players as static_players
 import requests
 from requests.adapters import HTTPAdapter
@@ -133,23 +134,34 @@ def build_players_from_static_roster(season: str) -> dict[str, Any]:
     return {"season": season, "count": len(players), "players": players}
 
 
-def build_gamelogs(session: requests.Session, season: str, season_type: str) -> dict[str, Any]:
-    payload = fetch_endpoint(
-        session,
-        "leaguegamelog",
-        {
-            "Counter": 1000,
-            "DateFrom": "",
-            "DateTo": "",
-            "Direction": "ASC",
-            "LeagueID": "00",
-            "PlayerOrTeamAbbreviation": "P",
-            "Season": season,
-            "SeasonType": season_type,
-            "Sorter": "DATE",
-        },
-        timeout=60,
-    )
+def build_gamelogs(season: str, season_type: str) -> dict[str, Any]:
+    payload = None
+    last_error: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            endpoint = leaguegamelog.LeagueGameLog(
+                counter=0,
+                direction="ASC",
+                league_id="00",
+                player_or_team_abbreviation="P",
+                season=season,
+                season_type_all_star=season_type,
+                sorter="DATE",
+                date_from_nullable="",
+                date_to_nullable="",
+                timeout=90,
+                get_request=True,
+            )
+            payload = endpoint.get_dict()
+            break
+        except Exception as err:
+            last_error = err
+            sleep_for = min(20, attempt * 4)
+            print(f"[warn] leaguegamelog failed {season} {season_type} attempt {attempt}/5: {err}", flush=True)
+            time.sleep(sleep_for)
+    if payload is None:
+        raise RuntimeError(f"leaguegamelog failed for {season} {season_type}: {last_error}")
+
     rows = extract_rows(payload, "LeagueGameLog")
 
     rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
@@ -186,7 +198,6 @@ def main() -> None:
     seasons = parse_seasons(args.seasons)
     output_root = Path(args.output).resolve()
 
-    session = make_session()
     files_players: dict[str, str] = {}
     files_gamelogs: dict[str, dict[str, str]] = {}
 
@@ -201,7 +212,9 @@ def main() -> None:
         for season_type in SEASON_TYPES:
             slug = season_type_slug(season_type)
             print(f"[build] gamelogs {season} {season_type}", flush=True)
-            gamelog_payload = build_gamelogs(session, season, season_type)
+            gamelog_payload = build_gamelogs(season, season_type)
+            if season == args.default_season and season_type == "Regular Season" and int(gamelog_payload["count"]) == 0:
+                raise RuntimeError(f"No LeagueGameLog rows returned for {season} {season_type}")
             rel = f"gamelogs/{season}/{slug}.json"
             dump_json(output_root / rel, gamelog_payload)
             files_gamelogs[season][slug] = rel
