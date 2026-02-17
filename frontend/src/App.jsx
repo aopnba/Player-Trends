@@ -143,6 +143,12 @@ function withHeadshot(player) {
   };
 }
 
+function localHeadshotUrl(playerId) {
+  const pid = Number(playerId || 0);
+  if (!pid) return FALLBACK_HEADSHOT;
+  return `${ASSET_BASE}headshots/${pid}.png`;
+}
+
 function App() {
   const exportRef = useRef(null);
   const headerRef = useRef(null);
@@ -301,10 +307,16 @@ function App() {
       if (headshotImg) {
         const original = headshotImg.getAttribute("src") || "";
         try {
-          const dataUrl = await fetchImageAsDataUrl(selectedPlayer?.headshot_url || FALLBACK_HEADSHOT);
+          const localUrl = new URL(localHeadshotUrl(selectedPlayer?.player_id), window.location.href).href;
+          const dataUrl = await fetchImageAsDataUrl(localUrl);
           headshotImg.setAttribute("src", dataUrl);
         } catch {
-          headshotImg.setAttribute("src", TRANSPARENT_PIXEL);
+          try {
+            const dataUrl = await fetchImageAsDataUrl(selectedPlayer?.headshot_url || FALLBACK_HEADSHOT);
+            headshotImg.setAttribute("src", dataUrl);
+          } catch {
+            headshotImg.setAttribute("src", TRANSPARENT_PIXEL);
+          }
         }
         await waitForImageLoad(headshotImg);
         restoreFns.push(() => headshotImg.setAttribute("src", original));
@@ -527,9 +539,14 @@ function App() {
           <div className="export-header" ref={headerRef}>
             <div className="player-side">
               <img
-                src={selectedPlayer?.headshot_url || FALLBACK_HEADSHOT}
+                src={localHeadshotUrl(selectedPlayer?.player_id)}
                 alt={selectedPlayer?.name || "Player"}
                 onError={(e) => {
+                  const fallback = selectedPlayer?.headshot_url || FALLBACK_HEADSHOT;
+                  if (e.currentTarget.src !== fallback) {
+                    e.currentTarget.src = fallback;
+                    return;
+                  }
                   e.currentTarget.src = FALLBACK_HEADSHOT;
                 }}
               />
