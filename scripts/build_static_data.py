@@ -93,7 +93,7 @@ def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type:
     # Counter pagination: keep pulling until no new rows.
     for counter in range(0, 80):
         params = {
-            "Counter": counter,
+            "Counter": 1000 + counter,
             "DateFrom": "",
             "DateTo": "",
             "Direction": "ASC",
