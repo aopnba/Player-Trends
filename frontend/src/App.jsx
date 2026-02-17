@@ -97,39 +97,6 @@ async function fetchImageAsDataUrl(url) {
   return blobToDataUrl(blob);
 }
 
-async function waitForImageLoad(img) {
-  if (img.complete) return;
-  await new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      resolve();
-    };
-    img.onload = finish;
-    img.onerror = finish;
-    setTimeout(finish, 2000);
-  });
-}
-
-async function inlineAllImagesInNode(node) {
-  const images = Array.from(node.querySelectorAll("img"));
-  for (const img of images) {
-    const src = String(img.getAttribute("src") || "").trim();
-    if (!src || src.startsWith("data:")) {
-      await waitForImageLoad(img);
-      continue;
-    }
-    try {
-      const absoluteSrc = new URL(src, window.location.href).href;
-      img.src = await fetchImageAsDataUrl(absoluteSrc);
-    } catch {
-      img.src = TRANSPARENT_PIXEL;
-    }
-    await waitForImageLoad(img);
-  }
-}
-
 function inferStatFields(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return [];
   const blacklist = new Set(["PLAYER_ID", "TEAM_ID", "GAME_ID", "GAME_DATE_EST"]);
@@ -309,7 +276,16 @@ function App() {
       exportNode.style.top = "0";
       exportNode.style.zIndex = "-1";
       document.body.appendChild(exportNode);
-      await inlineAllImagesInNode(exportNode);
+
+      const headshotInClone = exportNode.querySelector(".player-side img");
+      if (headshotInClone) {
+        try {
+          const dataUrl = await fetchImageAsDataUrl(selectedPlayer?.headshot_url || FALLBACK_HEADSHOT);
+          headshotInClone.src = dataUrl;
+        } catch {
+          headshotInClone.src = TRANSPARENT_PIXEL;
+        }
+      }
 
       const dataUrl = await toPng(exportNode, {
         pixelRatio: 3,
