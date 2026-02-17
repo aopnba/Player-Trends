@@ -268,57 +268,44 @@ function App() {
 
   async function exportPng() {
     if (!exportRef.current) return;
-    let exportNode = null;
+    const restoreFns = [];
     try {
-      exportNode = exportRef.current.cloneNode(true);
-      exportNode.style.position = "fixed";
-      exportNode.style.left = "-10000px";
-      exportNode.style.top = "0";
-      exportNode.style.zIndex = "-1";
-      document.body.appendChild(exportNode);
-
-      const headshotInClone = exportNode.querySelector(".player-side img");
-      if (headshotInClone) {
+      const headshotImg = exportRef.current.querySelector(".player-side img");
+      if (headshotImg) {
+        const original = headshotImg.getAttribute("src") || "";
         try {
           const dataUrl = await fetchImageAsDataUrl(selectedPlayer?.headshot_url || FALLBACK_HEADSHOT);
-          headshotInClone.src = dataUrl;
+          headshotImg.setAttribute("src", dataUrl);
         } catch {
-          headshotInClone.src = TRANSPARENT_PIXEL;
+          headshotImg.setAttribute("src", TRANSPARENT_PIXEL);
         }
+        await waitForImageLoad(headshotImg);
+        restoreFns.push(() => headshotImg.setAttribute("src", original));
       }
 
-      const logoInClone = exportNode.querySelector(".team-logo");
-      if (logoInClone) {
+      const logoImg = exportRef.current.querySelector(".team-logo");
+      if (logoImg) {
+        const original = logoImg.getAttribute("src") || "";
         try {
           const logoUrl = new URL(selectedLogo.url, window.location.href).href;
-          logoInClone.src = await fetchImageAsDataUrl(logoUrl);
+          const dataUrl = await fetchImageAsDataUrl(logoUrl);
+          logoImg.setAttribute("src", dataUrl);
         } catch {
-          logoInClone.src = TRANSPARENT_PIXEL;
+          logoImg.setAttribute("src", TRANSPARENT_PIXEL);
         }
+        await waitForImageLoad(logoImg);
+        restoreFns.push(() => logoImg.setAttribute("src", original));
       }
 
-      exportNode.querySelectorAll(".modebar, .modebar-container").forEach((el) => el.remove());
-
-      await Promise.all(
-        Array.from(exportNode.querySelectorAll("img")).map(
-          (img) =>
-            new Promise((resolve) => {
-              if (img.complete) return resolve();
-              img.onload = () => resolve();
-              img.onerror = () => {
-                img.src = TRANSPARENT_PIXEL;
-                resolve();
-              };
-              setTimeout(() => resolve(), 2000);
-            })
-        )
-      );
-
-      const dataUrl = await toPng(exportNode, {
+      const dataUrl = await toPng(exportRef.current, {
         pixelRatio: 3,
         cacheBust: true,
         backgroundColor: "#f8fafc",
-        imagePlaceholder: TRANSPARENT_PIXEL
+        imagePlaceholder: TRANSPARENT_PIXEL,
+        filter: (node) => {
+          if (!(node instanceof Element)) return true;
+          return !node.classList.contains("modebar") && !node.classList.contains("modebar-container");
+        }
       });
 
       const link = document.createElement("a");
@@ -328,9 +315,7 @@ function App() {
     } catch (err) {
       setError(`Export failed: ${err?.message || String(err)}`);
     } finally {
-      if (exportNode && exportNode.parentNode) {
-        exportNode.parentNode.removeChild(exportNode);
-      }
+      for (let i = restoreFns.length - 1; i >= 0; i -= 1) restoreFns[i]();
     }
   }
 
