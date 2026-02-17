@@ -147,7 +147,7 @@ def build_players(session: requests.Session, season: str) -> dict[str, Any]:
     }
 
 
-def build_gamelogs(session: requests.Session, season: str, season_type: str) -> dict[str, Any]:
+def build_gamelogs_league(session: requests.Session, season: str, season_type: str) -> list[dict[str, Any]]:
     payload = fetch_endpoint(
         session,
         "leaguegamelog",
@@ -162,10 +162,98 @@ def build_gamelogs(session: requests.Session, season: str, season_type: str) -> 
             "SeasonType": season_type,
             "Sorter": "DATE",
         },
-        timeout=60,
+        timeout=70,
     )
     rows = extract_rows(payload, "LeagueGameLog")
+    for row in rows:
+        if "PLAYER_ID" in row:
+            continue
+        if "Player_ID" in row:
+            row["PLAYER_ID"] = row.get("Player_ID")
+    return rows
 
+
+def build_gamelogs_per_player(
+    session: requests.Session,
+    season: str,
+    season_type: str,
+    player_ids: list[int],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    total = len(player_ids)
+    for idx, player_id in enumerate(player_ids, start=1):
+        # Progress every 25 players so Actions logs show forward movement.
+        if idx == 1 or idx % 25 == 0 or idx == total:
+            print(f"[build] playergamelog {season} {season_type}: {idx}/{total}", flush=True)
+
+        try:
+            payload = fetch_endpoint(
+                session,
+                "playergamelog",
+                {
+                    "PlayerID": player_id,
+                    "Season": season,
+                    "SeasonType": season_type,
+                    "LeagueID": "00",
+                },
+                timeout=35,
+            )
+        except requests.RequestException as exc:
+            print(f"[warn] playergamelog failed for {player_id}: {exc}", flush=True)
+            continue
+
+        player_rows = extract_rows(payload, "PlayerGameLog")
+        for row in player_rows:
+            if "PLAYER_ID" not in row:
+                row["PLAYER_ID"] = player_id
+        rows.extend(player_rows)
+        time.sleep(0.08)
+    return rows
+
+
+def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[int, str]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        pid = int(row.get("PLAYER_ID") or 0)
+        game_id = str(row.get("GAME_ID") or "")
+        key = (pid, game_id)
+        if pid <= 0 or not game_id:
+            # Keep imperfect rows so we do not silently drop data shape.
+            out.append(row)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def build_gamelogs(session: requests.Session, season: str, season_type: str, players_payload: dict[str, Any]) -> dict[str, Any]:
+    players = players_payload.get("players", [])
+    active_player_ids = [int(p.get("player_id") or 0) for p in players if bool(p.get("is_active")) and p.get("player_id")]
+    active_player_ids = sorted({pid for pid in active_player_ids if pid > 0})
+
+    rows: list[dict[str, Any]] = []
+    try:
+        rows = build_gamelogs_league(session, season, season_type)
+        print(f"[build] leaguegamelog rows: {len(rows)}", flush=True)
+    except requests.RequestException as exc:
+        print(f"[warn] leaguegamelog failed for {season} {season_type}: {exc}", flush=True)
+
+    row_player_ids = {int(r.get("PLAYER_ID") or 0) for r in rows if r.get("PLAYER_ID")}
+    missing_player_ids = [pid for pid in active_player_ids if pid not in row_player_ids]
+
+    # If league-level request is clearly partial, backfill with per-player logs.
+    if not rows or (season_type == "Regular Season" and len(missing_player_ids) > 25):
+        print(
+            f"[build] backfill via playergamelog for {len(missing_player_ids)} missing players "
+            f"({season} {season_type})",
+            flush=True,
+        )
+        rows.extend(build_gamelogs_per_player(session, season, season_type, missing_player_ids))
+
+    rows = dedupe_rows(rows)
     rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
     stat_fields = infer_stat_fields(rows)
 
@@ -202,8 +290,8 @@ def validate_coverage(
     active_total = len(active_player_ids)
     coverage = (covered / active_total) if active_total else 0.0
 
-    # Conservative threshold: if under 40% active-player coverage, data is almost certainly partial/bad.
-    if covered < 100 or coverage < 0.40:
+    # Threshold to avoid publishing obviously partial builds.
+    if covered < 150 or coverage < 0.55:
         raise RuntimeError(
             f"Incomplete gamelog coverage for {season} {season_type}: "
             f"{covered}/{active_total} active players with rows ({coverage:.1%}). "
@@ -248,7 +336,7 @@ def main() -> None:
         for season_type in SEASON_TYPES:
             slug = season_type_slug(season_type)
             print(f"[build] gamelogs {season} {season_type}", flush=True)
-            gamelog_payload = build_gamelogs(session, season, season_type)
+            gamelog_payload = build_gamelogs(session, season, season_type, players_payload)
             validate_coverage(season, season_type, players_payload, gamelog_payload)
             rel = f"gamelogs/{season}/{slug}.json"
             dump_json(output_root / rel, gamelog_payload)
