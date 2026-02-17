@@ -61,23 +61,7 @@ def parse_seasons(raw: str | None) -> list[str]:
     return out or DEFAULT_SEASONS
 
 
-def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type: str) -> list[dict[str, Any]]:
-    url = f"{NBA_BASE}/leaguegamelog"
-    params = {
-        "Counter": 0,
-        "DateFrom": "",
-        "DateTo": "",
-        "Direction": "ASC",
-        "LeagueID": "00",
-        "PlayerOrTeam": "P",
-        "Season": season,
-        "SeasonType": season_type,
-        "Sorter": "DATE",
-    }
-    resp = session.get(url, params=params, timeout=45)
-    resp.raise_for_status()
-    payload = resp.json()
-
+def _extract_leaguegamelog_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     result_sets = payload.get("resultSets") or []
     if result_sets:
         selected = result_sets[0]
@@ -99,6 +83,50 @@ def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type:
             rec["PLAYER_ID"] = rec.get("Player_ID")
         rows.append(rec)
     return rows
+
+
+def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type: str) -> list[dict[str, Any]]:
+    url = f"{NBA_BASE}/leaguegamelog"
+    all_rows: list[dict[str, Any]] = []
+    seen_ids: set[tuple[int, str]] = set()
+
+    # Counter pagination: keep pulling until no new rows.
+    for counter in range(0, 80):
+        params = {
+            "Counter": counter,
+            "DateFrom": "",
+            "DateTo": "",
+            "Direction": "ASC",
+            "LeagueID": "00",
+            "PlayerOrTeam": "P",
+            "Season": season,
+            "SeasonType": season_type,
+            "Sorter": "DATE",
+        }
+        resp = session.get(url, params=params, timeout=60)
+        resp.raise_for_status()
+        payload = resp.json()
+        rows = _extract_leaguegamelog_rows(payload)
+        if not rows:
+            print(f"[build] counter {counter}: 0 rows, stopping", flush=True)
+            break
+
+        before = len(seen_ids)
+        for rec in rows:
+            pid = int(rec.get("PLAYER_ID") or 0)
+            gid = str(rec.get("GAME_ID") or "")
+            key = (pid, gid)
+            if pid > 0 and gid:
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+            all_rows.append(rec)
+        added = len(seen_ids) - before
+        print(f"[build] counter {counter}: rows={len(rows)} new={added}", flush=True)
+        if added == 0:
+            break
+
+    return all_rows
 
 
 def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -177,7 +205,15 @@ def build_season_type(session: requests.Session, season: str, season_type: str) 
     all_rows = dedupe_rows(all_rows)
     all_rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
     stat_fields = infer_stat_fields(all_rows)
-    print(f"[build] rows {season} {season_type}: {len(all_rows)}", flush=True)
+    unique_players = len({int(r.get("PLAYER_ID") or 0) for r in all_rows if r.get("PLAYER_ID") is not None})
+    print(f"[build] rows {season} {season_type}: {len(all_rows)} players={unique_players}", flush=True)
+
+    # Guardrail: never publish a tiny partial pull.
+    if season_type == "Regular Season" and unique_players < 200:
+        raise RuntimeError(
+            f"LeagueGameLog returned partial data: only {unique_players} unique players "
+            f"for {season} {season_type}. Aborting publish."
+        )
 
     return {
         "season": season,
