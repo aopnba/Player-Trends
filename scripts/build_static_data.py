@@ -5,8 +5,7 @@ import argparse
 import json
 import os
 import re
-import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -62,37 +61,12 @@ def parse_seasons(raw: str | None) -> list[str]:
     return out or DEFAULT_SEASONS
 
 
-def season_start_year(season: str) -> int:
-    m = re.match(r"^(\d{4})-\d{2}$", season)
-    if not m:
-        raise ValueError(f"Invalid season format: {season}")
-    return int(m.group(1))
-
-
-def season_window(season: str, season_type: str) -> tuple[date, date]:
-    start_year = season_start_year(season)
-    end_year = start_year + 1
-    today = datetime.now(timezone.utc).date()
-
-    if season_type == "Playoffs":
-        start = date(end_year, 4, 1)
-        end = min(today, date(end_year, 7, 1))
-    else:
-        start = date(start_year, 10, 1)
-        end = min(today, date(end_year, 4, 20))
-
-    if end < start:
-        end = start
-    return start, end
-
-
-def fetch_leaguegamelog_day(session: requests.Session, season: str, season_type: str, d: date) -> list[dict[str, Any]]:
+def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type: str) -> list[dict[str, Any]]:
     url = f"{NBA_BASE}/leaguegamelog"
-    date_str = d.strftime("%m/%d/%Y")
     params = {
         "Counter": 0,
-        "DateFrom": date_str,
-        "DateTo": date_str,
+        "DateFrom": "",
+        "DateTo": "",
         "Direction": "ASC",
         "LeagueID": "00",
         "PlayerOrTeam": "P",
@@ -125,13 +99,6 @@ def fetch_leaguegamelog_day(session: requests.Session, season: str, season_type:
             rec["PLAYER_ID"] = rec.get("Player_ID")
         rows.append(rec)
     return rows
-
-
-def daterange(start: date, end: date):
-    cur = start
-    while cur <= end:
-        yield cur
-        cur += timedelta(days=1)
 
 
 def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -205,32 +172,12 @@ def dump_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def build_season_type(session: requests.Session, season: str, season_type: str) -> dict[str, Any]:
-    start, end = season_window(season, season_type)
-    all_rows: list[dict[str, Any]] = []
-    failed_days: list[str] = []
-
-    days = list(daterange(start, end))
-    total_days = len(days)
-    print(f"[build] {season} {season_type}: {start} -> {end} ({total_days} days)", flush=True)
-
-    for idx, d in enumerate(days, start=1):
-        if idx == 1 or idx % 20 == 0 or idx == total_days:
-            print(f"[build] day {idx}/{total_days} {d}", flush=True)
-        try:
-            rows = fetch_leaguegamelog_day(session, season, season_type, d)
-            all_rows.extend(rows)
-        except Exception as exc:
-            failed_days.append(f"{d} ({exc})")
-        time.sleep(0.08)
-
+    print(f"[build] leaguegamelog all dates {season} {season_type}", flush=True)
+    all_rows = fetch_leaguegamelog_all(session, season, season_type)
     all_rows = dedupe_rows(all_rows)
     all_rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
     stat_fields = infer_stat_fields(all_rows)
-
-    if failed_days:
-        print(f"[warn] failed days for {season} {season_type}: {len(failed_days)}", flush=True)
-        for item in failed_days[:10]:
-            print(f"[warn] {item}", flush=True)
+    print(f"[build] rows {season} {season_type}: {len(all_rows)}", flush=True)
 
     return {
         "season": season,
@@ -238,7 +185,7 @@ def build_season_type(session: requests.Session, season: str, season_type: str) 
         "count": len(all_rows),
         "stat_fields": stat_fields,
         "rows": all_rows,
-        "failed_days": failed_days,
+        "failed_days": [],
     }
 
 
