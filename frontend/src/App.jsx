@@ -89,6 +89,12 @@ function inferStatFields(rows) {
   });
 }
 
+function isPlaceholderRow(row) {
+  const gameId = String(row?.GAME_ID || "");
+  const matchup = String(row?.MATCHUP || "").toUpperCase();
+  return Number(row?.IS_PLACEHOLDER || 0) === 1 || gameId.startsWith("NO_GAME_") || matchup.includes("NO GAMES YET");
+}
+
 function withHeadshot(player) {
   const pid = Number(player?.player_id || 0);
   const raw = String(player?.headshot_url || "");
@@ -246,6 +252,7 @@ function App() {
     try {
       const payload = await getSeasonLogs(season, seasonType);
       const rows = (payload.rows || [])
+        .filter((r) => !isPlaceholderRow(r))
         .filter((r) => Number(r.PLAYER_ID) === Number(playerId))
         .sort((a, b) => new Date(a.GAME_DATE) - new Date(b.GAME_DATE));
 

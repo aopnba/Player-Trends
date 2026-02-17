@@ -67,6 +67,18 @@ def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def is_placeholder_row(row: dict[str, Any]) -> bool:
+    if int(row.get("IS_PLACEHOLDER") or 0) == 1:
+        return True
+    game_id = str(row.get("GAME_ID") or "")
+    matchup = str(row.get("MATCHUP") or "").upper()
+    return game_id.startswith("NO_GAME_") or "NO GAMES YET" in matchup
+
+
+def filter_real_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if not is_placeholder_row(row)]
+
+
 def fetch_players(season: str) -> list[dict[str, Any]]:
     endpoint = commonallplayers.CommonAllPlayers(
         is_only_current_season=1,
@@ -115,7 +127,7 @@ def fetch_player_gamelogs(player_id: int, season: str, season_type: str) -> list
 
 def _rows_by_player(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
     out: dict[int, list[dict[str, Any]]] = {}
-    for row in rows:
+    for row in filter_real_rows(rows):
         pid = int(row.get("PLAYER_ID") or 0)
         if pid <= 0:
             continue
@@ -130,7 +142,7 @@ def _load_existing_rows(path: Path) -> list[dict[str, Any]]:
         payload = json.loads(path.read_text(encoding="utf-8"))
         rows = payload.get("rows", [])
         if isinstance(rows, list):
-            return rows
+            return filter_real_rows(rows)
     except Exception:
         return []
     return []
@@ -188,7 +200,7 @@ def build_gamelogs_for_season_type(
 
         time.sleep(0.08)
 
-    rows = dedupe_rows(rows)
+    rows = dedupe_rows(filter_real_rows(rows))
     rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
     stat_fields = infer_stat_fields(rows)
     unique_players = len({int(r.get("PLAYER_ID") or 0) for r in rows if r.get("PLAYER_ID") is not None})
@@ -200,7 +212,7 @@ def build_gamelogs_for_season_type(
         flush=True,
     )
 
-    if season_type == "Regular Season" and unique_players < 200 and not existing_rows:
+    if season_type == "Regular Season" and unique_players < 200:
         raise RuntimeError(
             f"Incomplete Regular Season pull: only {unique_players} players had rows. "
             "Aborting publish."
