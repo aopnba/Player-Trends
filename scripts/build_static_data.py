@@ -81,7 +81,7 @@ def filter_real_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def fetch_players(season: str) -> list[dict[str, Any]]:
     endpoint = commonallplayers.CommonAllPlayers(
-        is_only_current_season=1,
+        is_only_current_season=0,
         season=season,
         timeout=60,
     )
@@ -105,6 +105,9 @@ def fetch_players(season: str) -> list[dict[str, Any]]:
                 "headshot_url": f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player_id}.png",
             }
         )
+    players = sorted(players, key=lambda x: (x.get("name") or "", int(x.get("player_id") or 0)))
+    if len(players) < 400:
+        raise RuntimeError(f"CommonAllPlayers returned too few rows for {season}: {len(players)}")
     return players
 
 
@@ -125,53 +128,14 @@ def fetch_player_gamelogs(player_id: int, season: str, season_type: str) -> list
     return rows
 
 
-def _rows_by_player(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
-    out: dict[int, list[dict[str, Any]]] = {}
-    for row in filter_real_rows(rows):
-        pid = int(row.get("PLAYER_ID") or 0)
-        if pid <= 0:
-            continue
-        out.setdefault(pid, []).append(row)
-    return out
-
-
-def _load_existing_rows(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        rows = payload.get("rows", [])
-        if isinstance(rows, list):
-            return filter_real_rows(rows)
-    except Exception:
-        return []
-    return []
-
-
-def _load_existing_players(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        players = payload.get("players", [])
-        if isinstance(players, list):
-            return players
-    except Exception:
-        return []
-    return []
-
-
 def build_gamelogs_for_season_type(
     season: str,
     season_type: str,
     active_player_ids: list[int],
-    existing_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     total = len(active_player_ids)
     failures = 0
-    reused_from_cache = 0
-    existing_by_player = _rows_by_player(existing_rows)
 
     for idx, player_id in enumerate(active_player_ids, start=1):
         if idx == 1 or idx % 20 == 0 or idx == total:
@@ -190,11 +154,7 @@ def build_gamelogs_for_season_type(
         if player_rows:
             rows.extend(player_rows)
         else:
-            fallback_rows = existing_by_player.get(player_id, [])
-            if fallback_rows:
-                reused_from_cache += 1
-                rows.extend(fallback_rows)
-            elif last_exc is not None:
+            if last_exc is not None:
                 failures += 1
                 print(f"[warn] player {player_id} failed: {last_exc}", flush=True)
 
@@ -208,13 +168,18 @@ def build_gamelogs_for_season_type(
     print(
         "[build] "
         f"{season} {season_type} rows={len(rows)} unique_players={unique_players} "
-        f"failures={failures} reused_from_cache={reused_from_cache}",
+        f"failures={failures}",
         flush=True,
     )
 
     if season_type == "Regular Season" and unique_players < 200:
         raise RuntimeError(
             f"Incomplete Regular Season pull: only {unique_players} players had rows. "
+            "Aborting publish."
+        )
+    if failures > 25:
+        raise RuntimeError(
+            f"Too many per-player request failures for {season} {season_type}: {failures}. "
             "Aborting publish."
         )
 
@@ -228,15 +193,7 @@ def build_gamelogs_for_season_type(
 
 
 def build_players_payload(season: str, all_players: list[dict[str, Any]], regular_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    rows_by_pid: set[int] = {int(r.get("PLAYER_ID") or 0) for r in regular_rows if r.get("PLAYER_ID") is not None}
-
-    # Keep only active players with at least one row in selected season,
-    # so frontend search maps directly to available static data.
-    out = [
-        p
-        for p in all_players
-        if bool(p.get("is_active")) and int(p.get("player_id") or 0) in rows_by_pid
-    ]
+    out = [p for p in all_players if bool(p.get("is_active"))]
     out.sort(key=lambda x: (x.get("name") or "", int(x.get("player_id") or 0)))
     return {"season": season, "count": len(out), "players": out}
 
@@ -262,18 +219,7 @@ def main() -> None:
     for season in seasons:
         print(f"[build] loading players for {season}", flush=True)
         players_rel = f"players/{season}.json"
-        existing_players = _load_existing_players(output_root / players_rel)
-        try:
-            all_players = fetch_players(season)
-        except Exception as exc:
-            if existing_players:
-                print(
-                    f"[warn] commonallplayers failed for {season}; reusing existing players snapshot: {exc}",
-                    flush=True,
-                )
-                all_players = existing_players
-            else:
-                raise
+        all_players = fetch_players(season)
         active_player_ids = sorted(
             {
                 int(p.get("player_id") or 0)
@@ -289,12 +235,10 @@ def main() -> None:
         for season_type in SEASON_TYPES:
             slug = season_type_slug(season_type)
             rel = f"gamelogs/{season}/{slug}.json"
-            existing_rows = _load_existing_rows(output_root / rel)
             payload = build_gamelogs_for_season_type(
                 season,
                 season_type,
                 active_player_ids,
-                existing_rows,
             )
             dump_json(output_root / rel, payload)
             files_gamelogs[season][slug] = rel
