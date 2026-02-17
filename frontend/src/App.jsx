@@ -287,6 +287,33 @@ function App() {
         }
       }
 
+      const logoInClone = exportNode.querySelector(".team-logo");
+      if (logoInClone) {
+        try {
+          const logoUrl = new URL(selectedLogo.url, window.location.href).href;
+          logoInClone.src = await fetchImageAsDataUrl(logoUrl);
+        } catch {
+          logoInClone.src = TRANSPARENT_PIXEL;
+        }
+      }
+
+      exportNode.querySelectorAll(".modebar, .modebar-container").forEach((el) => el.remove());
+
+      await Promise.all(
+        Array.from(exportNode.querySelectorAll("img")).map(
+          (img) =>
+            new Promise((resolve) => {
+              if (img.complete) return resolve();
+              img.onload = () => resolve();
+              img.onerror = () => {
+                img.src = TRANSPARENT_PIXEL;
+                resolve();
+              };
+              setTimeout(() => resolve(), 2000);
+            })
+        )
+      );
+
       const dataUrl = await toPng(exportNode, {
         pixelRatio: 3,
         cacheBust: true,
