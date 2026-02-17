@@ -19,6 +19,7 @@ jobs:
   update-data:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -55,7 +56,7 @@ jobs:
       - name: Build static data
         if: steps.gate.outputs.run == 'true'
         env:
-          STATIC_SEASONS: "2025-26,2024-25,2023-24"
+          STATIC_SEASONS: "2025-26"
           DEFAULT_SEASON: "2025-26"
         run: |
           python scripts/build_static_data.py --output frontend/public/data

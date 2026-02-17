@@ -41,10 +41,10 @@ def season_type_slug(value: str) -> str:
 def make_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
-        total=5,
-        read=5,
-        connect=5,
-        backoff_factor=1.0,
+        total=2,
+        read=2,
+        connect=2,
+        backoff_factor=0.6,
         status_forcelist=[429, 500, 502, 503, 504, 520, 522, 524],
         allowed_methods=["GET"],
     )
