@@ -143,23 +143,11 @@ function App() {
 
       try {
         const playersPath = manifest?.files?.players?.[season] || `players/${season}.json`;
-        const [playersPayload, logsPayload] = await Promise.all([
-          fetchJson(`${DATA_BASE}/${playersPath}`),
-          getSeasonLogs(season, seasonType).catch(() => ({ rows: [] }))
-        ]);
-
-        const playerIdsWithRows = new Set(
-          (logsPayload?.rows || []).map((r) => Number(r.PLAYER_ID))
-        );
-
-        let roster = (playersPayload.players || [])
+        const payload = await fetchJson(`${DATA_BASE}/${playersPath}`);
+        const roster = (payload.players || [])
           .filter((p) => p.is_active !== false)
           .map(withHeadshot)
           .sort((a, b) => String(a.name).localeCompare(String(b.name)));
-
-        if (playerIdsWithRows.size > 0) {
-          roster = roster.filter((p) => playerIdsWithRows.has(Number(p.player_id)));
-        }
 
         setPlayers(roster);
         if (roster.length > 0) {
@@ -174,12 +162,12 @@ function App() {
         setPlayers([]);
         setPlayerId(0);
         setPlayerSearch("");
-        setError(`Failed to load player list for ${season} ${seasonType}: ${err.message}`);
+        setError(`Failed to load player list for ${season}: ${err.message}`);
       }
     }
 
     loadPlayers();
-  }, [manifest, season, seasonType]);
+  }, [manifest, season]);
 
   const playerOptions = useMemo(
     () => players.map((p) => ({ ...p, label: `${p.name} (${p.player_id})` })),
