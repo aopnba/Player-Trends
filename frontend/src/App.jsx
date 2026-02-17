@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Plot from "react-plotly.js";
 import { toPng } from "html-to-image";
+import Plotly from "plotly.js-dist-min";
 
 const ASSET_BASE = import.meta.env.BASE_URL || "/";
 const DATA_BASE = `${ASSET_BASE}data`;
@@ -97,6 +98,30 @@ async function fetchImageAsDataUrl(url) {
   return blobToDataUrl(blob);
 }
 
+async function waitForImageLoad(img) {
+  if (img.complete) return;
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    img.onload = finish;
+    img.onerror = finish;
+    setTimeout(finish, 2000);
+  });
+}
+
+async function loadImageElement(src) {
+  return await new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
 function inferStatFields(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return [];
   const blacklist = new Set(["PLAYER_ID", "TEAM_ID", "GAME_ID", "GAME_DATE_EST"]);
@@ -120,6 +145,8 @@ function withHeadshot(player) {
 
 function App() {
   const exportRef = useRef(null);
+  const headerRef = useRef(null);
+  const plotDivRef = useRef(null);
   const logsCacheRef = useRef(new Map());
 
   const [manifest, setManifest] = useState(null);
@@ -267,10 +294,10 @@ function App() {
   }
 
   async function exportPng() {
-    if (!exportRef.current) return;
+    if (!exportRef.current || !headerRef.current || !plotDivRef.current) return;
     const restoreFns = [];
     try {
-      const headshotImg = exportRef.current.querySelector(".player-side img");
+      const headshotImg = headerRef.current.querySelector(".player-side img");
       if (headshotImg) {
         const original = headshotImg.getAttribute("src") || "";
         try {
@@ -283,7 +310,7 @@ function App() {
         restoreFns.push(() => headshotImg.setAttribute("src", original));
       }
 
-      const logoImg = exportRef.current.querySelector(".team-logo");
+      const logoImg = headerRef.current.querySelector(".team-logo");
       if (logoImg) {
         const original = logoImg.getAttribute("src") || "";
         try {
@@ -297,16 +324,33 @@ function App() {
         restoreFns.push(() => logoImg.setAttribute("src", original));
       }
 
-      const dataUrl = await toPng(exportRef.current, {
+      const headerUrl = await toPng(headerRef.current, {
         pixelRatio: 3,
         cacheBust: true,
         backgroundColor: "#f8fafc",
-        imagePlaceholder: TRANSPARENT_PIXEL,
-        filter: (node) => {
-          if (!(node instanceof Element)) return true;
-          return !node.classList.contains("modebar") && !node.classList.contains("modebar-container");
-        }
+        imagePlaceholder: TRANSPARENT_PIXEL
       });
+
+      const chartWidth = Math.max(1, Math.round(plotDivRef.current.clientWidth));
+      const chartHeight = Math.max(1, Math.round(plotDivRef.current.clientHeight));
+      const chartUrl = await Plotly.toImage(plotDivRef.current, {
+        format: "png",
+        width: chartWidth,
+        height: chartHeight,
+        scale: 3
+      });
+
+      const [headerImage, chartImage] = await Promise.all([loadImageElement(headerUrl), loadImageElement(chartUrl)]);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(headerImage.width, chartImage.width);
+      canvas.height = headerImage.height + chartImage.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas context unavailable");
+      ctx.fillStyle = "#f8fafc";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(headerImage, 0, 0);
+      ctx.drawImage(chartImage, 0, headerImage.height);
+      const dataUrl = canvas.toDataURL("image/png");
 
       const link = document.createElement("a");
       link.download = `${(selectedPlayer?.name || "player").replace(/\s+/g, "_")}_${statField || "stat"}_trend.png`;
@@ -480,7 +524,7 @@ function App() {
             "--header-secondary": selectedLogo.secondaryColor
           }}
         >
-          <div className="export-header">
+          <div className="export-header" ref={headerRef}>
             <div className="player-side">
               <img
                 src={selectedPlayer?.headshot_url || FALLBACK_HEADSHOT}
@@ -518,6 +562,12 @@ function App() {
                 style={{ width: "100%" }}
                 config={{ displaylogo: false }}
                 useResizeHandler
+                onInitialized={(_, graphDiv) => {
+                  plotDivRef.current = graphDiv;
+                }}
+                onUpdate={(_, graphDiv) => {
+                  plotDivRef.current = graphDiv;
+                }}
               />
             ) : (
               <p className="small">Select a player and click "Load Trend".</p>
