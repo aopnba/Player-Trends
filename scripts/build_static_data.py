@@ -178,6 +178,39 @@ def build_gamelogs(session: requests.Session, season: str, season_type: str) -> 
     }
 
 
+def validate_coverage(
+    season: str,
+    season_type: str,
+    players_payload: dict[str, Any],
+    gamelog_payload: dict[str, Any],
+) -> None:
+    """Fail the build if static gamelog coverage is clearly incomplete."""
+    players = players_payload.get("players", [])
+    rows = gamelog_payload.get("rows", [])
+    row_player_ids = {int(r.get("PLAYER_ID") or 0) for r in rows if r.get("PLAYER_ID") is not None}
+
+    # Only check active players in regular season.
+    if season_type != "Regular Season":
+        return
+
+    active_player_ids = {
+        int(p.get("player_id") or 0)
+        for p in players
+        if bool(p.get("is_active")) and p.get("player_id") is not None
+    }
+    covered = len(active_player_ids & row_player_ids)
+    active_total = len(active_player_ids)
+    coverage = (covered / active_total) if active_total else 0.0
+
+    # Conservative threshold: if under 40% active-player coverage, data is almost certainly partial/bad.
+    if covered < 100 or coverage < 0.40:
+        raise RuntimeError(
+            f"Incomplete gamelog coverage for {season} {season_type}: "
+            f"{covered}/{active_total} active players with rows ({coverage:.1%}). "
+            "Aborting publish to avoid shipping partial data."
+        )
+
+
 def dump_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
@@ -216,6 +249,7 @@ def main() -> None:
             slug = season_type_slug(season_type)
             print(f"[build] gamelogs {season} {season_type}", flush=True)
             gamelog_payload = build_gamelogs(session, season, season_type)
+            validate_coverage(season, season_type, players_payload, gamelog_payload)
             rel = f"gamelogs/{season}/{slug}.json"
             dump_json(output_root / rel, gamelog_payload)
             files_gamelogs[season][slug] = rel
