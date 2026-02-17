@@ -15,7 +15,7 @@ A push triggers GitHub Pages deploy automatically.
 ## Data source endpoints used in the refresh script
 
 - `commonallplayers`
-- `leaguegamelog`
+- `playergamelogs`
 
 Script path:
 

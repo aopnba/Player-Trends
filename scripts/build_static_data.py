@@ -5,49 +5,15 @@ import argparse
 import json
 import os
 import re
-from datetime import date, datetime, timedelta, timezone
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from nba_api.stats.endpoints import commonallplayers, playergamelogs
 
-NBA_BASE = "https://stats.nba.com/stats"
-DEFAULT_SEASONS = ["2025-26"]
 SEASON_TYPES = ["Regular Season", "Playoffs"]
-
-HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive",
-    "Origin": "https://www.nba.com",
-    "Referer": "https://www.nba.com/",
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "x-nba-stats-origin": "stats",
-    "x-nba-stats-token": "true",
-}
-
-
-def make_session() -> requests.Session:
-    session = requests.Session()
-    retry = Retry(
-        total=4,
-        read=4,
-        connect=4,
-        backoff_factor=0.8,
-        status_forcelist=[429, 500, 502, 503, 504, 520, 522, 524],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    session.headers.update(HEADERS)
-    return session
+DEFAULT_SEASONS = ["2025-26"]
 
 
 def season_type_slug(value: str) -> str:
@@ -61,188 +27,156 @@ def parse_seasons(raw: str | None) -> list[str]:
     return out or DEFAULT_SEASONS
 
 
-def _extract_leaguegamelog_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    result_sets = payload.get("resultSets") or []
-    if result_sets:
-        selected = result_sets[0]
-        for rs in result_sets:
-            if str(rs.get("name", "")).lower() == "leaguegamelog":
-                selected = rs
-                break
-        headers = selected.get("headers", [])
-        row_set = selected.get("rowSet", [])
-    else:
-        rs = payload.get("resultSet", {})
-        headers = rs.get("headers", [])
-        row_set = rs.get("rowSet", [])
-
-    rows: list[dict[str, Any]] = []
-    for row in row_set:
-        rec = {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
-        if "PLAYER_ID" not in rec and "Player_ID" in rec:
-            rec["PLAYER_ID"] = rec.get("Player_ID")
-        rows.append(rec)
-    return rows
-
-
-def _leaguegamelog_request(
-    session: requests.Session,
-    season: str,
-    season_type: str,
-    counter: int,
-    date_from: str | None,
-    date_to: str | None,
-) -> list[dict[str, Any]]:
-    url = f"{NBA_BASE}/leaguegamelog"
-    params = {
-        "Counter": counter,
-        "DateFrom": date_from,
-        "DateTo": date_to,
-        "Direction": "DESC",
-        "LeagueID": "00",
-        "PlayerOrTeam": "P",
-        "Season": season,
-        "SeasonType": season_type,
-        "Sorter": "DATE",
-    }
-    resp = session.get(url, params=params, timeout=60)
-    resp.raise_for_status()
-    payload = resp.json()
-    return _extract_leaguegamelog_rows(payload)
-
-
-def _season_bounds(season: str, season_type: str) -> tuple[date, date]:
-    # Conservative windows by NBA calendar for fallback day-sliced pulls.
-    start_year = int(season.split("-")[0])
-    end_year = start_year + 1
-    if season_type == "Playoffs":
-        start = date(end_year, 4, 1)
-        end = date(end_year, 7, 31)
-    else:
-        start = date(start_year, 10, 1)
-        end = date(end_year, 6, 30)
-
-    today = datetime.now(timezone.utc).date()
-    if end > today:
-        end = today
-    return start, end
-
-
-def _unique_player_count(rows: list[dict[str, Any]]) -> int:
-    return len({int(r.get("PLAYER_ID") or 0) for r in rows if r.get("PLAYER_ID") is not None})
-
-
-def fetch_leaguegamelog_all(session: requests.Session, season: str, season_type: str) -> list[dict[str, Any]]:
-    rows = _leaguegamelog_request(
-        session=session,
-        season=season,
-        season_type=season_type,
-        counter=1000,
-        date_from=None,
-        date_to=None,
-    )
-    unique_players = _unique_player_count(rows)
-    print(
-        f"[build] one-shot counter=1000 rows={len(rows)} unique_players={unique_players}",
-        flush=True,
-    )
-    if season_type == "Playoffs":
-        return rows
-    if unique_players >= 200:
-        return rows
-
-    print(
-        "[build] one-shot pull appears partial, switching to day-sliced LeagueGameLog fallback",
-        flush=True,
-    )
-    start, end = _season_bounds(season, season_type)
-    all_rows: list[dict[str, Any]] = []
-    current = start
-    while current <= end:
-        day = current.strftime("%m/%d/%Y")
-        day_rows = _leaguegamelog_request(
-            session=session,
-            season=season,
-            season_type=season_type,
-            counter=1000,
-            date_from=day,
-            date_to=day,
-        )
-        if day_rows:
-            all_rows.extend(day_rows)
-        current += timedelta(days=1)
-
-    all_rows = dedupe_rows(all_rows)
-    print(
-        f"[build] fallback day-sliced rows={len(all_rows)} unique_players={_unique_player_count(all_rows)}",
-        flush=True,
-    )
-    return all_rows
-
-
-def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[tuple[int, str]] = set()
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        pid = int(r.get("PLAYER_ID") or 0)
-        gid = str(r.get("GAME_ID") or "")
-        if pid > 0 and gid:
-            key = (pid, gid)
-            if key in seen:
-                continue
-            seen.add(key)
-        out.append(r)
+def to_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out:
+        return None
     return out
 
 
 def infer_stat_fields(rows: list[dict[str, Any]]) -> list[str]:
     if not rows:
         return []
-    blacklist = {"PLAYER_ID", "TEAM_ID", "GAME_ID"}
-    keys = set()
-    for r in rows:
-        keys.update(r.keys())
+    blacklist = {"PLAYER_ID", "TEAM_ID", "GAME_ID", "GAME_DATE_EST"}
     out: list[str] = []
-    for k in sorted(keys):
-        if k in blacklist or k.endswith("_RANK"):
+    for key in rows[0].keys():
+        if key in blacklist or key.endswith("_RANK"):
             continue
-        numeric = False
-        for r in rows:
-            v = r.get(k)
-            try:
-                float(v)
-                numeric = True
-                break
-            except (TypeError, ValueError):
-                continue
-        if numeric:
-            out.append(k)
+        if any(to_float(row.get(key)) is not None for row in rows):
+            out.append(key)
+    return sorted(set(out))
+
+
+def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[int, str]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        pid = int(row.get("PLAYER_ID") or 0)
+        game_id = str(row.get("GAME_ID") or "")
+        if pid <= 0 or not game_id:
+            out.append(row)
+            continue
+        key = (pid, game_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
     return out
 
 
-def build_players_from_rows(season: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    # Use latest seen row per player to capture current team assignment.
-    by_id: dict[int, dict[str, Any]] = {}
-
-    def dt_key(x: dict[str, Any]) -> str:
-        return str(x.get("GAME_DATE") or "")
-
-    for r in sorted(rows, key=dt_key):
+def fetch_players(season: str) -> list[dict[str, Any]]:
+    endpoint = commonallplayers.CommonAllPlayers(
+        is_only_current_season=1,
+        season=season,
+        timeout=60,
+    )
+    frames = endpoint.get_data_frames()
+    if not frames:
+        raise RuntimeError("No frames returned from commonallplayers")
+    rows = frames[0].to_dict(orient="records")
+    players: list[dict[str, Any]] = []
+    for row in rows:
         try:
-            pid = int(r.get("PLAYER_ID"))
+            player_id = int(row.get("PERSON_ID"))
         except (TypeError, ValueError):
             continue
-        by_id[pid] = {
-            "player_id": pid,
-            "name": r.get("PLAYER_NAME"),
-            "team_id": r.get("TEAM_ID"),
-            "team": r.get("TEAM_ABBREVIATION"),
-            "is_active": True,
-            "headshot_url": f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png",
-        }
+        players.append(
+            {
+                "player_id": player_id,
+                "name": row.get("DISPLAY_FIRST_LAST"),
+                "team_id": row.get("TEAM_ID"),
+                "team": row.get("TEAM_ABBREVIATION"),
+                "is_active": int(row.get("ROSTERSTATUS") or 0) == 1,
+                "headshot_url": f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player_id}.png",
+            }
+        )
+    return players
 
-    players = sorted(by_id.values(), key=lambda x: (x.get("name") or "", x["player_id"]))
-    return {"season": season, "count": len(players), "players": players}
+
+def fetch_player_gamelogs(player_id: int, season: str, season_type: str) -> list[dict[str, Any]]:
+    endpoint = playergamelogs.PlayerGameLogs(
+        player_id_nullable=player_id,
+        season_nullable=season,
+        season_type_nullable=season_type,
+        timeout=60,
+    )
+    frames = endpoint.get_data_frames()
+    if not frames:
+        return []
+    rows = frames[0].to_dict(orient="records")
+    for row in rows:
+        if "PLAYER_ID" not in row:
+            row["PLAYER_ID"] = player_id
+    return rows
+
+
+def build_gamelogs_for_season_type(season: str, season_type: str, active_player_ids: list[int]) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    total = len(active_player_ids)
+    failures = 0
+
+    for idx, player_id in enumerate(active_player_ids, start=1):
+        if idx == 1 or idx % 20 == 0 or idx == total:
+            print(f"[build] {season} {season_type} player {idx}/{total}", flush=True)
+
+        player_rows: list[dict[str, Any]] = []
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                player_rows = fetch_player_gamelogs(player_id, season, season_type)
+                break
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(min(1.0 * attempt, 3.0))
+
+        if player_rows:
+            rows.extend(player_rows)
+        elif last_exc is not None:
+            failures += 1
+            print(f"[warn] player {player_id} failed: {last_exc}", flush=True)
+
+        time.sleep(0.08)
+
+    rows = dedupe_rows(rows)
+    rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
+    stat_fields = infer_stat_fields(rows)
+    unique_players = len({int(r.get("PLAYER_ID") or 0) for r in rows if r.get("PLAYER_ID") is not None})
+
+    print(
+        f"[build] {season} {season_type} rows={len(rows)} unique_players={unique_players} failures={failures}",
+        flush=True,
+    )
+
+    if season_type == "Regular Season" and unique_players < 200:
+        raise RuntimeError(
+            f"Incomplete Regular Season pull: only {unique_players} players had rows. "
+            "Aborting publish."
+        )
+
+    return {
+        "season": season,
+        "season_type": season_type,
+        "count": len(rows),
+        "stat_fields": stat_fields,
+        "rows": rows,
+    }
+
+
+def build_players_payload(season: str, all_players: list[dict[str, Any]], regular_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    rows_by_pid: set[int] = {int(r.get("PLAYER_ID") or 0) for r in regular_rows if r.get("PLAYER_ID") is not None}
+
+    # Keep only active players with at least one row in selected season,
+    # so frontend search maps directly to available static data.
+    out = [
+        p
+        for p in all_players
+        if bool(p.get("is_active")) and int(p.get("player_id") or 0) in rows_by_pid
+    ]
+    out.sort(key=lambda x: (x.get("name") or "", int(x.get("player_id") or 0)))
+    return {"season": season, "count": len(out), "players": out}
 
 
 def dump_json(path: Path, data: dict[str, Any]) -> None:
@@ -250,34 +184,8 @@ def dump_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
 
 
-def build_season_type(session: requests.Session, season: str, season_type: str) -> dict[str, Any]:
-    print(f"[build] leaguegamelog all dates {season} {season_type}", flush=True)
-    all_rows = fetch_leaguegamelog_all(session, season, season_type)
-    all_rows = dedupe_rows(all_rows)
-    all_rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
-    stat_fields = infer_stat_fields(all_rows)
-    unique_players = len({int(r.get("PLAYER_ID") or 0) for r in all_rows if r.get("PLAYER_ID") is not None})
-    print(f"[build] rows {season} {season_type}: {len(all_rows)} players={unique_players}", flush=True)
-
-    # Guardrail: never publish a tiny partial pull.
-    if season_type == "Regular Season" and unique_players < 200:
-        raise RuntimeError(
-            f"LeagueGameLog returned partial data: only {unique_players} unique players "
-            f"for {season} {season_type}. Aborting publish."
-        )
-
-    return {
-        "season": season,
-        "season_type": season_type,
-        "count": len(all_rows),
-        "stat_fields": stat_fields,
-        "rows": all_rows,
-        "failed_days": [],
-    }
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build static NBA data files using LeagueGameLog")
+    parser = argparse.ArgumentParser(description="Build static NBA data files using playergamelogs")
     parser.add_argument("--output", default="frontend/public/data", help="Output data directory")
     parser.add_argument("--seasons", default=os.getenv("STATIC_SEASONS", ""), help="Comma-separated seasons")
     parser.add_argument("--default-season", default=os.getenv("DEFAULT_SEASON", "2025-26"))
@@ -285,25 +193,35 @@ def main() -> None:
 
     seasons = parse_seasons(args.seasons)
     output_root = Path(args.output).resolve()
-    session = make_session()
 
     files_players: dict[str, str] = {}
     files_gamelogs: dict[str, dict[str, str]] = {}
 
     for season in seasons:
+        print(f"[build] loading players for {season}", flush=True)
+        all_players = fetch_players(season)
+        active_player_ids = sorted(
+            {
+                int(p.get("player_id") or 0)
+                for p in all_players
+                if bool(p.get("is_active")) and p.get("player_id") is not None
+            }
+        )
+        print(f"[build] active players {season}: {len(active_player_ids)}", flush=True)
+
         files_gamelogs[season] = {}
-        season_rows_for_players: list[dict[str, Any]] = []
+        regular_rows: list[dict[str, Any]] = []
 
         for season_type in SEASON_TYPES:
+            payload = build_gamelogs_for_season_type(season, season_type, active_player_ids)
             slug = season_type_slug(season_type)
-            payload = build_season_type(session, season, season_type)
             rel = f"gamelogs/{season}/{slug}.json"
             dump_json(output_root / rel, payload)
             files_gamelogs[season][slug] = rel
             if season_type == "Regular Season":
-                season_rows_for_players.extend(payload["rows"])
+                regular_rows = payload["rows"]
 
-        players_payload = build_players_from_rows(season, season_rows_for_players)
+        players_payload = build_players_payload(season, all_players, regular_rows)
         players_rel = f"players/{season}.json"
         dump_json(output_root / players_rel, players_payload)
         files_players[season] = players_rel
