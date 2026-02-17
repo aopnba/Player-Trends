@@ -113,10 +113,40 @@ def fetch_player_gamelogs(player_id: int, season: str, season_type: str) -> list
     return rows
 
 
-def build_gamelogs_for_season_type(season: str, season_type: str, active_player_ids: list[int]) -> dict[str, Any]:
+def _rows_by_player(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+    out: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        pid = int(row.get("PLAYER_ID") or 0)
+        if pid <= 0:
+            continue
+        out.setdefault(pid, []).append(row)
+    return out
+
+
+def _load_existing_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        rows = payload.get("rows", [])
+        if isinstance(rows, list):
+            return rows
+    except Exception:
+        return []
+    return []
+
+
+def build_gamelogs_for_season_type(
+    season: str,
+    season_type: str,
+    active_player_ids: list[int],
+    existing_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     total = len(active_player_ids)
     failures = 0
+    reused_from_cache = 0
+    existing_by_player = _rows_by_player(existing_rows)
 
     for idx, player_id in enumerate(active_player_ids, start=1):
         if idx == 1 or idx % 20 == 0 or idx == total:
@@ -134,9 +164,14 @@ def build_gamelogs_for_season_type(season: str, season_type: str, active_player_
 
         if player_rows:
             rows.extend(player_rows)
-        elif last_exc is not None:
-            failures += 1
-            print(f"[warn] player {player_id} failed: {last_exc}", flush=True)
+        else:
+            fallback_rows = existing_by_player.get(player_id, [])
+            if fallback_rows:
+                reused_from_cache += 1
+                rows.extend(fallback_rows)
+            elif last_exc is not None:
+                failures += 1
+                print(f"[warn] player {player_id} failed: {last_exc}", flush=True)
 
         time.sleep(0.08)
 
@@ -146,11 +181,13 @@ def build_gamelogs_for_season_type(season: str, season_type: str, active_player_
     unique_players = len({int(r.get("PLAYER_ID") or 0) for r in rows if r.get("PLAYER_ID") is not None})
 
     print(
-        f"[build] {season} {season_type} rows={len(rows)} unique_players={unique_players} failures={failures}",
+        "[build] "
+        f"{season} {season_type} rows={len(rows)} unique_players={unique_players} "
+        f"failures={failures} reused_from_cache={reused_from_cache}",
         flush=True,
     )
 
-    if season_type == "Regular Season" and unique_players < 200:
+    if season_type == "Regular Season" and unique_players < 200 and not existing_rows:
         raise RuntimeError(
             f"Incomplete Regular Season pull: only {unique_players} players had rows. "
             "Aborting publish."
@@ -213,9 +250,15 @@ def main() -> None:
         regular_rows: list[dict[str, Any]] = []
 
         for season_type in SEASON_TYPES:
-            payload = build_gamelogs_for_season_type(season, season_type, active_player_ids)
             slug = season_type_slug(season_type)
             rel = f"gamelogs/{season}/{slug}.json"
+            existing_rows = _load_existing_rows(output_root / rel)
+            payload = build_gamelogs_for_season_type(
+                season,
+                season_type,
+                active_player_ids,
+                existing_rows,
+            )
             dump_json(output_root / rel, payload)
             files_gamelogs[season][slug] = rel
             if season_type == "Regular Season":

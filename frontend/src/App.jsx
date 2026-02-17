@@ -106,6 +106,7 @@ function App() {
 
   const [manifest, setManifest] = useState(null);
   const [players, setPlayers] = useState([]);
+  const [availablePlayerIds, setAvailablePlayerIds] = useState(new Set());
 
   const [playerSearch, setPlayerSearch] = useState("");
   const [playerId, setPlayerId] = useState(0);
@@ -170,8 +171,11 @@ function App() {
   }, [manifest, season]);
 
   const playerOptions = useMemo(
-    () => players.map((p) => ({ ...p, label: `${p.name} (${p.player_id})` })),
-    [players]
+    () =>
+      players
+        .filter((p) => availablePlayerIds.size === 0 || availablePlayerIds.has(Number(p.player_id)))
+        .map((p) => ({ ...p, label: `${p.name} (${p.player_id})` })),
+    [players, availablePlayerIds]
   );
 
   const playerLabelToId = useMemo(() => {
@@ -207,6 +211,32 @@ function App() {
     logsCacheRef.current.set(cacheKey, payload);
     return payload;
   }
+
+  useEffect(() => {
+    async function syncAvailablePlayers() {
+      if (!manifest || !season || !players.length) return;
+      try {
+        const payload = await getSeasonLogs(season, seasonType);
+        const ids = new Set(
+          (payload.rows || [])
+            .map((r) => Number(r.PLAYER_ID))
+            .filter((id) => Number.isFinite(id) && id > 0)
+        );
+        setAvailablePlayerIds(ids);
+
+        if (!ids.has(Number(playerId))) {
+          const fallback = players.find((p) => ids.has(Number(p.player_id)));
+          if (fallback) {
+            setPlayerId(fallback.player_id);
+            setPlayerSearch(`${fallback.name} (${fallback.player_id})`);
+          }
+        }
+      } catch {
+        setAvailablePlayerIds(new Set());
+      }
+    }
+    syncAvailablePlayers();
+  }, [manifest, season, seasonType, players, playerId]);
 
   async function loadTrends() {
     if (!playerId) return;
