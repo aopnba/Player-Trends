@@ -149,6 +149,11 @@ function localHeadshotUrl(playerId) {
   return `${ASSET_BASE}headshots/${pid}.png`;
 }
 
+function formatStatLabel(value) {
+  const raw = String(value || "");
+  return raw.toUpperCase() === "PLUS_MINUS" ? "+/-" : raw;
+}
+
 function App() {
   const exportRef = useRef(null);
   const headerRef = useRef(null);
@@ -384,6 +389,7 @@ function App() {
     const x = rows.map((r) => r.GAME_DATE);
     const y = rows.map((r) => Number(r[statField]));
     const rolling = rollingAverage(y, Math.max(1, Number(rollingWindow) || 1));
+    const statLabel = formatStatLabel(statField);
 
     return {
       data: [
@@ -430,7 +436,7 @@ function App() {
           tickfont: { size: 11 }
         },
         yaxis: {
-          title: statField,
+          title: statLabel,
           automargin: true,
           gridcolor: "rgba(23,37,84,0.12)",
           zerolinecolor: "rgba(23,37,84,0.18)",
@@ -556,7 +562,7 @@ function App() {
             <div className="header-copy">
               <h1>{selectedPlayer?.name || "NBA Player"}</h1>
               <h2>
-                {statField || "Stat"} Daily Trend | {season} {seasonType}
+                {formatStatLabel(statField) || "Stat"} Daily Trend | {season} {seasonType}
               </h2>
             </div>
 
