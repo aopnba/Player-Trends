@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import time
 from datetime import datetime, timezone
@@ -80,15 +81,37 @@ def filter_real_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def fetch_players(season: str) -> list[dict[str, Any]]:
-    endpoint = commonallplayers.CommonAllPlayers(
-        is_only_current_season=0,
-        season=season,
-        timeout=60,
-    )
-    frames = endpoint.get_data_frames()
-    if not frames:
-        raise RuntimeError("No frames returned from commonallplayers")
-    rows = frames[0].to_dict(orient="records")
+    rows: list[dict[str, Any]] = []
+    last_exc: Exception | None = None
+    # Try current-season first (smaller payload), then all-season if needed.
+    current_season_flags = [1, 1, 1, 0, 0]
+    for attempt, current_flag in enumerate(current_season_flags, start=1):
+        try:
+            endpoint = commonallplayers.CommonAllPlayers(
+                is_only_current_season=current_flag,
+                season=season,
+                timeout=120,
+            )
+            frames = endpoint.get_data_frames()
+            if not frames:
+                raise RuntimeError("No frames returned from commonallplayers")
+            rows = frames[0].to_dict(orient="records")
+            if len(rows) < 300:
+                raise RuntimeError(
+                    f"CommonAllPlayers payload too small on attempt {attempt}: {len(rows)} rows"
+                )
+            break
+        except Exception as exc:
+            last_exc = exc
+            sleep_for = min(8.0 * attempt, 45.0) + random.uniform(0.0, 1.5)
+            print(
+                f"[warn] commonallplayers attempt {attempt} failed: {exc}; retrying in {sleep_for:.1f}s",
+                flush=True,
+            )
+            time.sleep(sleep_for)
+
+    if not rows:
+        raise RuntimeError(f"CommonAllPlayers failed for {season}: {last_exc}")
     players: list[dict[str, Any]] = []
     for row in rows:
         try:
@@ -106,7 +129,7 @@ def fetch_players(season: str) -> list[dict[str, Any]]:
             }
         )
     players = sorted(players, key=lambda x: (x.get("name") or "", int(x.get("player_id") or 0)))
-    if len(players) < 400:
+    if len(players) < 300:
         raise RuntimeError(f"CommonAllPlayers returned too few rows for {season}: {len(players)}")
     return players
 
