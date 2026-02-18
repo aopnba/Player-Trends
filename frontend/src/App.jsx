@@ -122,6 +122,22 @@ async function loadImageElement(src) {
   });
 }
 
+function stripLowAlphaPixels(imageEl, alphaCutoff = 36) {
+  const canvas = document.createElement("canvas");
+  canvas.width = imageEl.width;
+  canvas.height = imageEl.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return imageEl;
+  ctx.drawImage(imageEl, 0, 0);
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = imgData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < alphaCutoff) d[i + 3] = 0;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas;
+}
+
 function inferStatFields(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return [];
   const blacklist = new Set(["PLAYER_ID", "TEAM_ID", "GAME_ID", "GAME_DATE_EST"]);
@@ -308,6 +324,8 @@ function App() {
     if (!exportRef.current || !headerRef.current || !plotDivRef.current) return;
     const restoreFns = [];
     try {
+      let logoOverlay = null;
+      let logoPlacement = null;
       const headshotImg = headerRef.current.querySelector(".player-side img");
       if (headshotImg) {
         const original = headshotImg.getAttribute("src") || "";
@@ -329,16 +347,29 @@ function App() {
 
       const logoImg = headerRef.current.querySelector(".team-logo");
       if (logoImg) {
+        const headerRect = headerRef.current.getBoundingClientRect();
+        const logoRect = logoImg.getBoundingClientRect();
+        logoPlacement = {
+          x: logoRect.left - headerRect.left,
+          y: logoRect.top - headerRect.top,
+          width: logoRect.width,
+          height: logoRect.height
+        };
         const original = logoImg.getAttribute("src") || "";
         try {
           const logoUrl = new URL(selectedLogo.url, window.location.href).href;
           const dataUrl = await fetchImageAsDataUrl(logoUrl);
-          logoImg.setAttribute("src", dataUrl);
+          const logoImage = await loadImageElement(dataUrl);
+          logoOverlay = stripLowAlphaPixels(logoImage);
+          logoImg.style.visibility = "hidden";
+          restoreFns.push(() => {
+            logoImg.style.visibility = "";
+          });
         } catch {
           logoImg.setAttribute("src", TRANSPARENT_PIXEL);
+          await waitForImageLoad(logoImg);
+          restoreFns.push(() => logoImg.setAttribute("src", original));
         }
-        await waitForImageLoad(logoImg);
-        restoreFns.push(() => logoImg.setAttribute("src", original));
       }
 
       const headerUrl = await toPng(headerRef.current, {
@@ -366,6 +397,17 @@ function App() {
       ctx.fillStyle = "#f8fafc";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(headerImage, 0, 0);
+      if (logoOverlay && logoPlacement) {
+        const sx = headerImage.width / Math.max(1, headerRef.current.clientWidth);
+        const sy = headerImage.height / Math.max(1, headerRef.current.clientHeight);
+        ctx.drawImage(
+          logoOverlay,
+          logoPlacement.x * sx,
+          logoPlacement.y * sy,
+          logoPlacement.width * sx,
+          logoPlacement.height * sy
+        );
+      }
       ctx.drawImage(chartImage, 0, headerImage.height);
       const dataUrl = canvas.toDataURL("image/png");
 
