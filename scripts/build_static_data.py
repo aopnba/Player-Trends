@@ -11,57 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from nba_api.stats.endpoints import leaguegamelog
-from nba_api.stats.static import players as static_players
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-NBA_BASE = "https://stats.nba.com/stats"
 SEASON_TYPES = ["Regular Season", "Playoffs"]
 DEFAULT_SEASONS = ["2025-26", "2024-25", "2023-24"]
 
-HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive",
-    "Origin": "https://www.nba.com",
-    "Referer": "https://www.nba.com/",
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "x-nba-stats-origin": "stats",
-    "x-nba-stats-token": "true",
-}
-
-
 def season_type_slug(value: str) -> str:
     return re.sub(r"\s+", "-", value.strip().lower())
-
-
-def make_session() -> requests.Session:
-    session = requests.Session()
-    retry = Retry(
-        total=5,
-        read=5,
-        connect=5,
-        backoff_factor=1.0,
-        status_forcelist=[429, 500, 502, 503, 504, 520, 522, 524],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    session.headers.update(HEADERS)
-    return session
-
-
-def fetch_endpoint(session: requests.Session, endpoint: str, params: dict[str, Any], timeout: int = 40) -> dict[str, Any]:
-    url = f"{NBA_BASE}/{endpoint}"
-    response = session.get(url, params=params, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
 
 
 def extract_rows(payload: dict[str, Any], set_name: str | None = None) -> list[dict[str, Any]]:
@@ -111,26 +66,36 @@ def infer_stat_fields(rows: list[dict[str, Any]]) -> list[str]:
     return sorted(set(out))
 
 
-def build_players_from_static_roster(season: str) -> dict[str, Any]:
-    roster = static_players.get_active_players()
-    players: list[dict[str, Any]] = []
-    for row in roster:
-        try:
-            player_id = int(row.get("id"))
-        except (TypeError, ValueError):
-            continue
-        full_name = row.get("full_name") or f"{row.get('first_name', '')} {row.get('last_name', '')}".strip()
-        players.append(
-            {
-                "player_id": player_id,
-                "name": full_name,
-                "team_id": None,
-                "team": None,
-                "is_active": True,
-                "headshot_url": f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player_id}.png",
-            }
-        )
-    players.sort(key=lambda x: (x["name"] or "", x["player_id"]))
+def build_players_from_gamelogs(season: str, gamelog_payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    by_player: dict[int, dict[str, Any]] = {}
+    for payload in gamelog_payloads:
+        for row in payload.get("rows", []):
+            try:
+                player_id = int(row.get("PLAYER_ID"))
+            except (TypeError, ValueError):
+                continue
+            name = str(row.get("PLAYER_NAME") or "").strip()
+            team_id = row.get("TEAM_ID")
+            team = row.get("TEAM_ABBREVIATION")
+            current = by_player.get(player_id)
+            if current is None:
+                by_player[player_id] = {
+                    "player_id": player_id,
+                    "name": name,
+                    "team_id": team_id,
+                    "team": team,
+                    "is_active": True,
+                    "headshot_url": f"https://cdn.nba.com/headshots/nba/latest/1040x760/{player_id}.png",
+                }
+            else:
+                if name and (not current.get("name") or len(name) > len(str(current.get("name")))):
+                    current["name"] = name
+                if team_id:
+                    current["team_id"] = team_id
+                if team:
+                    current["team"] = team
+
+    players = sorted(by_player.values(), key=lambda x: (x.get("name") or "", x["player_id"]))
     return {"season": season, "count": len(players), "players": players}
 
 
@@ -202,13 +167,8 @@ def main() -> None:
     files_gamelogs: dict[str, dict[str, str]] = {}
 
     for season in seasons:
-        print(f"[build] players {season}", flush=True)
-        players_payload = build_players_from_static_roster(season)
-        players_rel = f"players/{season}.json"
-        dump_json(output_root / players_rel, players_payload)
-        files_players[season] = players_rel
-
         files_gamelogs[season] = {}
+        season_gamelog_payloads: list[dict[str, Any]] = []
         for season_type in SEASON_TYPES:
             slug = season_type_slug(season_type)
             print(f"[build] gamelogs {season} {season_type}", flush=True)
@@ -218,7 +178,14 @@ def main() -> None:
             rel = f"gamelogs/{season}/{slug}.json"
             dump_json(output_root / rel, gamelog_payload)
             files_gamelogs[season][slug] = rel
+            season_gamelog_payloads.append(gamelog_payload)
             time.sleep(1.5)
+
+        print(f"[build] players {season}", flush=True)
+        players_payload = build_players_from_gamelogs(season, season_gamelog_payloads)
+        players_rel = f"players/{season}.json"
+        dump_json(output_root / players_rel, players_payload)
+        files_players[season] = players_rel
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
