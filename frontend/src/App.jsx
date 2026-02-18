@@ -170,6 +170,21 @@ function formatStatLabel(value) {
   return raw.toUpperCase() === "PLUS_MINUS" ? "+/-" : raw;
 }
 
+function drawRoundedRect(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
 function App() {
   const exportRef = useRef(null);
   const headerRef = useRef(null);
@@ -390,25 +405,45 @@ function App() {
 
       const [headerImage, chartImage] = await Promise.all([loadImageElement(headerUrl), loadImageElement(chartUrl)]);
       const canvas = document.createElement("canvas");
-      canvas.width = Math.max(headerImage.width, chartImage.width);
-      canvas.height = headerImage.height + chartImage.height;
+      const outerPad = 18;
+      const sectionGap = 16;
+      const panelPad = 12;
+      const panelRadius = 14;
+      const chartPanelW = chartImage.width + panelPad * 2;
+      const chartPanelH = chartImage.height + panelPad * 2;
+      const contentW = Math.max(headerImage.width, chartPanelW);
+      const contentH = headerImage.height + sectionGap + chartPanelH;
+      canvas.width = contentW + outerPad * 2;
+      canvas.height = contentH + outerPad * 2;
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas context unavailable");
+
       ctx.fillStyle = "#f8fafc";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(headerImage, 0, 0);
+
+      ctx.drawImage(headerImage, outerPad, outerPad);
       if (logoOverlay && logoPlacement) {
         const sx = headerImage.width / Math.max(1, headerRef.current.clientWidth);
         const sy = headerImage.height / Math.max(1, headerRef.current.clientHeight);
         ctx.drawImage(
           logoOverlay,
-          logoPlacement.x * sx,
-          logoPlacement.y * sy,
+          outerPad + logoPlacement.x * sx,
+          outerPad + logoPlacement.y * sy,
           logoPlacement.width * sx,
           logoPlacement.height * sy
         );
       }
-      ctx.drawImage(chartImage, 0, headerImage.height);
+
+      const panelX = outerPad + (contentW - chartPanelW) / 2;
+      const panelY = outerPad + headerImage.height + sectionGap;
+      drawRoundedRect(ctx, panelX, panelY, chartPanelW, chartPanelH, panelRadius);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.78)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(15, 23, 42, 0.14)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.drawImage(chartImage, panelX + panelPad, panelY + panelPad);
       const dataUrl = canvas.toDataURL("image/png");
 
       const link = document.createElement("a");
