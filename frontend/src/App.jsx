@@ -11,6 +11,13 @@ const TRANSPARENT_PIXEL =
 
 const PODCAST_LOGOS = [
   {
+    name: "ALL NBA",
+    url: `${ASSET_BASE}podcast-logos/ALL%20NBA%20Logo.png`,
+    headerFont: '"Cooper Black", "Cooper Std", Georgia, serif',
+    primaryColor: "#000000",
+    secondaryColor: "#000000"
+  },
+  {
     name: "CHGO Bulls Podcast",
     url: `${ASSET_BASE}podcast-logos/CHGO%20Bulls%20Logo.png`,
     headerFont: '"Gotham Black", "Gotham", "Cooper Black", serif',
