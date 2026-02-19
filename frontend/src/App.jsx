@@ -174,7 +174,17 @@ function localHeadshotUrl(playerId) {
 
 function formatStatLabel(value) {
   const raw = String(value || "");
-  return raw.toUpperCase() === "PLUS_MINUS" ? "+/-" : raw;
+  const upper = raw.toUpperCase();
+  if (upper === "PLUS_MINUS") return "+/-";
+  if (upper.endsWith("_PCT")) {
+    if (upper === "FG3_PCT") return "3P%";
+    return `${raw.slice(0, -4)}%`;
+  }
+  return raw;
+}
+
+function isPctStat(value) {
+  return String(value || "").toUpperCase().endsWith("_PCT");
 }
 
 function drawRoundedRect(ctx, x, y, w, h, r) {
@@ -474,6 +484,7 @@ function App() {
     const y = rows.map((r) => Number(r[statField]));
     const rolling = rollingAverage(y, Math.max(1, Number(rollingWindow) || 1));
     const statLabel = formatStatLabel(statField);
+    const pctStat = isPctStat(statField);
 
     return {
       data: [
@@ -483,7 +494,10 @@ function App() {
           x,
           y,
           text: rows.map(
-            (r) => `${r.MATCHUP || ""}<br>${toDateLabel(r.GAME_DATE)}<br>${statField}: ${Number(r[statField]).toFixed(2)}`
+            (r) =>
+              `${r.MATCHUP || ""}<br>${toDateLabel(r.GAME_DATE)}<br>${statLabel}: ${
+                pctStat ? `${(Number(r[statField]) * 100).toFixed(1)}%` : Number(r[statField]).toFixed(2)
+              }`
           ),
           hovertemplate: "%{text}<extra></extra>",
           marker: {
@@ -492,7 +506,7 @@ function App() {
             opacity: 0.86,
             line: { width: 1, color: "#fff" }
           },
-          name: `${statField} (Daily)`
+          name: `${statLabel} (Daily)`
         },
         {
           type: "scatter",
@@ -522,6 +536,7 @@ function App() {
         yaxis: {
           title: statLabel,
           automargin: true,
+          tickformat: pctStat ? ".0%" : undefined,
           gridcolor: "rgba(23,37,84,0.12)",
           zerolinecolor: "rgba(23,37,84,0.18)",
           tickfont: { size: 13 }
@@ -588,7 +603,9 @@ function App() {
               <label>Stat</label>
               <select value={statField} onChange={(e) => setStatField(e.target.value)}>
                 {(trendData?.stat_fields || []).map((f) => (
-                  <option key={f}>{f}</option>
+                  <option key={f} value={f}>
+                    {formatStatLabel(f)}
+                  </option>
                 ))}
               </select>
             </div>
