@@ -153,6 +153,13 @@ def parse_seasons(raw: str | None) -> list[str]:
     return out or DEFAULT_SEASONS
 
 
+def load_existing_json(path: Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build static NBA data files for GitHub Pages")
     parser.add_argument("--output", default="frontend/public/data", help="Output data directory")
@@ -172,11 +179,21 @@ def main() -> None:
         for season_type in SEASON_TYPES:
             slug = season_type_slug(season_type)
             print(f"[build] gamelogs {season} {season_type}", flush=True)
-            gamelog_payload = build_gamelogs(season, season_type)
-            if season == args.default_season and season_type == "Regular Season" and int(gamelog_payload["count"]) == 0:
-                raise RuntimeError(f"No LeagueGameLog rows returned for {season} {season_type}")
             rel = f"gamelogs/{season}/{slug}.json"
-            dump_json(output_root / rel, gamelog_payload)
+            out_path = output_root / rel
+            gamelog_payload = None
+            try:
+                gamelog_payload = build_gamelogs(season, season_type)
+                if season == args.default_season and season_type == "Regular Season" and int(gamelog_payload["count"]) == 0:
+                    raise RuntimeError(f"No LeagueGameLog rows returned for {season} {season_type}")
+                dump_json(out_path, gamelog_payload)
+            except Exception as err:
+                existing = load_existing_json(out_path)
+                if existing is None:
+                    raise RuntimeError(f"Failed to refresh {season} {season_type} and no cached file exists: {err}") from err
+                print(f"[warn] using cached gamelog for {season} {season_type}: {err}", flush=True)
+                gamelog_payload = existing
+
             files_gamelogs[season][slug] = rel
             season_gamelog_payloads.append(gamelog_payload)
             time.sleep(1.5)
