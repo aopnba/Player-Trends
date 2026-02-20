@@ -56,7 +56,15 @@ jobs:
           STATIC_SEASONS: "2025-26,2024-25,2023-24"
           DEFAULT_SEASON: "2025-26"
         run: |
-          python scripts/build_static_data.py --output frontend/public/data
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TARGET_DATE="$(TZ=America/New_York date -d 'yesterday' +%Y-%m-%d)"
+            echo "Incremental refresh date (ET yesterday): ${TARGET_DATE}"
+            python scripts/build_static_data.py \
+              --output frontend/public/data \
+              --incremental-date "${TARGET_DATE}"
+          else
+            python scripts/build_static_data.py --output frontend/public/data
+          fi
 
       - name: Commit updated data
         if: steps.gate.outputs.run == 'true'

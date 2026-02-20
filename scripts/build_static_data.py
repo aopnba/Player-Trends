@@ -6,7 +6,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +141,49 @@ def build_gamelogs(season: str, season_type: str) -> dict[str, Any]:
     }
 
 
+def build_gamelogs_for_date(season: str, season_type: str, game_date: date) -> dict[str, Any]:
+    payload = None
+    last_error: Exception | None = None
+    date_mmddyyyy = game_date.strftime("%m/%d/%Y")
+    for attempt in range(1, 6):
+        try:
+            endpoint = leaguegamelog.LeagueGameLog(
+                counter=0,
+                direction="ASC",
+                league_id="00",
+                player_or_team_abbreviation="P",
+                season=season,
+                season_type_all_star=season_type,
+                sorter="DATE",
+                date_from_nullable=date_mmddyyyy,
+                date_to_nullable=date_mmddyyyy,
+                timeout=90,
+                get_request=True,
+            )
+            payload = endpoint.get_dict()
+            break
+        except Exception as err:
+            last_error = err
+            sleep_for = min(20, attempt * 4)
+            print(
+                f"[warn] leaguegamelog date fetch failed {season} {season_type} {game_date.isoformat()} attempt {attempt}/5: {err}",
+                flush=True,
+            )
+            time.sleep(sleep_for)
+    if payload is None:
+        raise RuntimeError(f"leaguegamelog date fetch failed for {season} {season_type} {game_date.isoformat()}: {last_error}")
+
+    rows = extract_rows(payload, "LeagueGameLog")
+    rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
+    return {
+        "season": season,
+        "season_type": season_type,
+        "count": len(rows),
+        "stat_fields": infer_stat_fields(rows),
+        "rows": rows,
+    }
+
+
 def dump_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
@@ -160,20 +203,50 @@ def load_existing_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def merge_rows_by_date(existing_rows: list[dict[str, Any]], date_rows: list[dict[str, Any]], target_date_iso: str) -> list[dict[str, Any]]:
+    # Remove target-date rows first, then add fresh rows, and dedupe by game/player.
+    base = [r for r in existing_rows if str(r.get("GAME_DATE") or "") != target_date_iso]
+    merged = base + date_rows
+    deduped: dict[tuple[str, int], dict[str, Any]] = {}
+    for r in merged:
+        key = (str(r.get("GAME_ID") or ""), int(r.get("PLAYER_ID") or 0))
+        deduped[key] = r
+    rows = list(deduped.values())
+    rows.sort(key=lambda r: (str(r.get("GAME_DATE") or ""), int(r.get("PLAYER_ID") or 0)))
+    return rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build static NBA data files for GitHub Pages")
     parser.add_argument("--output", default="frontend/public/data", help="Output data directory")
     parser.add_argument("--seasons", default=os.getenv("STATIC_SEASONS", ""), help="Comma separated seasons")
     parser.add_argument("--default-season", default=os.getenv("DEFAULT_SEASON", "2025-26"))
+    parser.add_argument(
+        "--incremental-date",
+        default=os.getenv("INCREMENTAL_DATE", ""),
+        help="YYYY-MM-DD date to refresh only for default season (daily incremental mode)",
+    )
     args = parser.parse_args()
 
     seasons = parse_seasons(args.seasons)
     output_root = Path(args.output).resolve()
+    incremental_date: date | None = None
+    if args.incremental_date:
+        incremental_date = date.fromisoformat(args.incremental_date)
 
     files_players: dict[str, str] = {}
     files_gamelogs: dict[str, dict[str, str]] = {}
 
     for season in seasons:
+        if incremental_date and season != args.default_season:
+            # In incremental mode, only refresh current season.
+            players_rel = f"players/{season}.json"
+            files_players[season] = players_rel
+            files_gamelogs[season] = {}
+            for season_type in SEASON_TYPES:
+                files_gamelogs[season][season_type_slug(season_type)] = f"gamelogs/{season}/{season_type_slug(season_type)}.json"
+            continue
+
         files_gamelogs[season] = {}
         season_gamelog_payloads: list[dict[str, Any]] = []
         for season_type in SEASON_TYPES:
@@ -183,10 +256,26 @@ def main() -> None:
             out_path = output_root / rel
             gamelog_payload = None
             try:
-                gamelog_payload = build_gamelogs(season, season_type)
-                if season == args.default_season and season_type == "Regular Season" and int(gamelog_payload["count"]) == 0:
-                    raise RuntimeError(f"No LeagueGameLog rows returned for {season} {season_type}")
-                dump_json(out_path, gamelog_payload)
+                if incremental_date and season == args.default_season:
+                    existing = load_existing_json(out_path)
+                    if existing is None:
+                        raise RuntimeError(f"Missing existing file for incremental update: {out_path}")
+                    date_payload = build_gamelogs_for_date(season, season_type, incremental_date)
+                    target_iso = incremental_date.isoformat()
+                    merged_rows = merge_rows_by_date(existing.get("rows", []), date_payload.get("rows", []), target_iso)
+                    gamelog_payload = {
+                        "season": season,
+                        "season_type": season_type,
+                        "count": len(merged_rows),
+                        "stat_fields": infer_stat_fields(merged_rows),
+                        "rows": merged_rows,
+                    }
+                    dump_json(out_path, gamelog_payload)
+                else:
+                    gamelog_payload = build_gamelogs(season, season_type)
+                    if season == args.default_season and season_type == "Regular Season" and int(gamelog_payload["count"]) == 0:
+                        raise RuntimeError(f"No LeagueGameLog rows returned for {season} {season_type}")
+                    dump_json(out_path, gamelog_payload)
             except Exception as err:
                 existing = load_existing_json(out_path)
                 if existing is None:
