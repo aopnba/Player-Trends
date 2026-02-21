@@ -61,7 +61,8 @@ jobs:
             echo "Incremental refresh date (ET yesterday): ${TARGET_DATE}"
             python scripts/build_static_data.py \
               --output frontend/public/data \
-              --incremental-date "${TARGET_DATE}"
+              --incremental-date "${TARGET_DATE}" \
+              --incremental-days 3
           else
             python scripts/build_static_data.py --output frontend/public/data
           fi

@@ -226,6 +226,12 @@ def main() -> None:
         default=os.getenv("INCREMENTAL_DATE", ""),
         help="YYYY-MM-DD date to refresh only for default season (daily incremental mode)",
     )
+    parser.add_argument(
+        "--incremental-days",
+        type=int,
+        default=int(os.getenv("INCREMENTAL_DAYS", "1")),
+        help="Number of days (ending at incremental-date) to refresh in incremental mode",
+    )
     args = parser.parse_args()
 
     seasons = parse_seasons(args.seasons)
@@ -233,6 +239,7 @@ def main() -> None:
     incremental_date: date | None = None
     if args.incremental_date:
         incremental_date = date.fromisoformat(args.incremental_date)
+    incremental_days = max(1, int(args.incremental_days))
 
     files_players: dict[str, str] = {}
     files_gamelogs: dict[str, dict[str, str]] = {}
@@ -260,9 +267,12 @@ def main() -> None:
                     existing = load_existing_json(out_path)
                     if existing is None:
                         raise RuntimeError(f"Missing existing file for incremental update: {out_path}")
-                    date_payload = build_gamelogs_for_date(season, season_type, incremental_date)
-                    target_iso = incremental_date.isoformat()
-                    merged_rows = merge_rows_by_date(existing.get("rows", []), date_payload.get("rows", []), target_iso)
+                    merged_rows = existing.get("rows", [])
+                    for offset in range(incremental_days):
+                        target = date.fromordinal(incremental_date.toordinal() - offset)
+                        date_payload = build_gamelogs_for_date(season, season_type, target)
+                        target_iso = target.isoformat()
+                        merged_rows = merge_rows_by_date(merged_rows, date_payload.get("rows", []), target_iso)
                     gamelog_payload = {
                         "season": season,
                         "season_type": season_type,
